@@ -1,0 +1,356 @@
+Detailed specifications and assumptions:
+
+- a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response
+- a cache communicates with other caches through the bus, and the bus is "owned" by a cache until it completely finished his transactions corresponding to one transition in the state diagram
+- a cache can always responds immediately to bus requests
+- the system always prefers cache-to-cache transfer if any other cache has the line cached
+- if multiple caches could deliver a line, there is no additional time needed to select one (e.g. they can all send it simultaneously)
+- sending a bus transaction to other busses takes exactly 2 cycles (the time for sending the address)
+- a cache can always fully answer bus requests, even if it is currently delivering a cache line that is getting evicted while sending (the line is then buffered)
+- while the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illionis and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it
+- arbitration policy: the processor/cache with lower id is preferred
+    - e.g. if P0 and P1 want to write to the same block in the same cycle, P0 will proceed and P1 will have to evict
+- the memory is word-addressible not byte-addressible
+- memory is only updated on eviction
+
+Key insights:
+
+1. The bus can only do one thing at a time.
+2. All memory transfer goes through the bus.
+=> When a bus transaction is processed we can already completely infer the whole time it takes to complete it, because the system cannot change in the meantime until the transaction is finished.
+3. Implementation suggests a lot of nested and bidirectional communication between the different parts
+=> Clock-based message queueing system ?
+4. There are two types of processor events for the cache:
+    - those that can be answered right away (unique transition)
+    - those that require communication with other caches and possibly memory. The latter need to wait for the bus to be free (transition ambiguous, need more information)
+5. This is not the case for bus updates in MESI and Dragon, these can always be handled immediately
+
+
+processor.tick()
+    if WaitingForCache
+        if peek_msg('cache') is not Proceed:
+            return
+        else
+            Ready
+    if ExecutingOther(n):
+        set state ExecutingOther(n-1)
+    if ExecutingOther(0):
+        Ready
+    if Ready
+        [exec instr]
+        on ld instruction
+            if cache.is_hit()   // cache hit is 1 cycle
+                Ready
+        on st instruction
+            if cache.is_hit()   // cache hit is 1 cycle
+                Ready
+        on other instruction:
+            ExecutingOther(x)
+
+cache.tick()
+    if ResolvingRequest(r, t)
+        if t-1 == 0
+            processor.send('cache', Proceed)
+            Done
+        else
+            ResolvingRequest(r, t-1)
+    else if WaitingForBus
+        if fetch_msg('bus_response') is Some(msg)
+            self.on_bus_ready()
+    else (if Idle)
+        if fetch_msg('processor') is Some(msg)
+            self.pr_sig(msg)
+    
+    while fetch_msg('bus') is Some(msg):
+        self.bus_sig(msg)
+
+cache.pr_sig()
+    Read =>
+        on hit:
+            [protocol]
+            set cache state: ResolvingRequest(Wait(1))
+        on miss:
+            [protocol] queue bus request
+            set cache state: ResolvingRequest(Unknown)
+    Write =>
+        on hit:
+            [protocol]
+            set cache state: ResolvingRequest(Wait(1))
+        on miss:
+            [protocol] queue bus request
+            set cache state ResolvingRequest(Unknown)
+
+cache.bus_sig()
+    ...
+
+cache.on_bus_ready()
+    [protocol]
+    
+            on hit:
+                set cache state: ResolvingRequest(transaction_time)
+                update / notify other caches
+                return transaction_time
+            on miss:
+                // load from memory
+                set cache state: ResolvingRequest(100)
+                return 100
+
+bus.tick()
+    if Busy(Unknown):
+        pass
+    else if Busy(t):
+        t-1 == 0 ? Idle : Busy(t-1)
+    else if Idle and fetch_msg('caches') is Some(msg):
+        msg.cache.send('bus_response', msg.request)
+        Busy(Unknown)
+
+
+PLAN -------------------------------------------------------------------------------------------------
+New apporach:
+- implement everything that happens during a cycle using funcion calls
+- implement everything that takes a cycle with messages
+
+
+
+
+processor.tick()
+    // processor is ticked first
+    
+    // previous state 
+    
+    if WaitingForCache:
+        if peek_msg('cache') is Proceed:
+            Ready
+        else
+            return
+    if ExecutingOther(n)
+        if n-1 == 0
+            Ready
+        else
+            ExecutingOther(n-1)
+    
+    // current state
+    
+    if Ready
+        [exec instr]
+        on load(a)
+            cache.pr_sig(Read(a))
+            WaitingforCache
+        on store(a)
+            cache.pr_sig(Write(a))
+            WaitingForCache
+        on other(t)
+            ExecutingOther(t-1)
+
+cache.tick()
+    // cache is ticked second, after processor
+    
+    if ResolvingRequest(r, t)
+        if t-1 == 0
+            // cache can proceed with next instruction in the next cycle
+            processor.send('cache', Proceed)
+            Idle
+        else
+            ResolvingRequest(r, t-1)
+
+cache.pr_sig(sig)
+    MESI =>
+        I =>    // miss
+            Read(a) =>
+                bus.send('caches', sig)
+                WaitingForBus
+            Write(a) =>
+                processor.send('cache', Proceed)
+                bus.send_sig(self, BusRdX(a))
+                self.set_block_state(a, M)
+                Idle
+        S =>    // hit
+            Read(a) =>
+                processor.send('cache', Proceed)
+                Idle
+            Write(a) =>
+                processor.send('cache', Proceed)
+                bus.send_sig(self, BusRdX(a))
+                self.set_block_state(a, M)
+                Idle
+        E =>    // hit
+            Read(a) =>
+                processor.send('cache', Proceed)
+                Idle
+            Write(a) =>
+                processor.send('cache', Proceed)
+                self.set_block_state(a, M)
+                Idle
+        M =>    // hit
+            processor.send('cache', Proceed)
+            Idle
+    Dragon =>
+        I =>    // miss
+            bus.send('caches', sig)
+            WaitingForBus
+        E =>    // hit
+            Read(a) =>
+                processor.send('cache', Proceed)
+                Idle
+            Write(a) =>
+                processor.send('cache', Proceed)
+                self.set_block_state(a, M)
+                Idle
+        Sc =>   // hit
+            Read(a) =>
+                processor.send('cache', Proceed)
+                Idle
+            Write(a) =>
+                bus.send('caches', Write(a))
+                WaitingForBus
+        Sm =>   // hit
+            Read(a) =>
+                processor.send('cache', Proceed)
+                Idle
+            Write(a) =>
+                bus.send('caches', Write(a))
+                WaitingForBus
+        M =>    // hit
+            processor.send('cache', Proceed)
+            Idle
+
+cache.pr_sig_bus_ready(msg) -> int
+    MESI =>
+        I =>
+            Read(a) =>
+                if other cache has cache line -> transfer
+                    t = ask_other_caches_time() + cache2cache_transfer_time()
+                    self.set_block_state(a, S)
+                else
+                    t = ask_other_caches_time() + 100
+                    self.set_block_state(a, E)
+                    
+            Write(a) => error
+        S => error
+        E => error
+        M => error
+    DrDragonagon =>
+        I =>
+            Read(a) =>
+                if other cache has cache line -> transfer
+                    t = ask_other_caches_time() + cache2cache_transfer_time()
+                    bus.send_sig(self, BusRd(a))
+                    self.set_block_state(a, Sc)
+                else
+                    t = ask_other_caches_time() + 100
+                    bus.send_sig(self, BusRd(a))
+                    self.set_block_state(a, E)
+            Write(a) =>
+                if other cache has line
+                    t = ask_other_caches_time() + cache2cache_transfer_time()
+                    self.set_block_state(a, Sm)
+                    bus.send_sig(self, BusRd(a))
+                    bus.send_sig(self, BusUpd(a))
+                else
+                    t = ask_other_caches_time() + 100
+                    self.set_block_state(a, M)
+                    bus.send_sig(self, BusRd(a))
+        E => error
+        Sc =>
+            Read(a) => error
+            Write(a) =>
+                if other cache has cache line
+                    t = ask_other_caches_time()
+                    self.set_block_state(a, Sm)
+                    bus.send_sig(a, BusUpd(a))
+                else
+                    t = ask_other_caches_time()
+                    self.set_block_state(a, M)
+                    bus.send_sig(a, BusUpd(a))
+        Sm =>
+            Read(a) => error
+            Write(a) => 
+                if other cache has cashe ilne
+                    t = ask_other_caches_time()
+                    bus.send_sig(a, BusUpd(a))
+                else
+                    t = ask_other_caches_time()
+                    bus.send_sig(a, BusUpd(a))
+                    self.set_block_state(a, M)
+        M => error
+        
+    ResolvingRequest(t)
+    return t
+
+cache.bus_sig(sig) -> int
+    MESI =>
+        I => pass
+        S =>
+            BusRd => pass
+            BusRdX =>
+                set.set_block_state(a, I)
+        E =>
+            BusRd =>
+                // flush
+                self.set_block_state(a, S)
+                return flush_time()
+            BusRdX =>
+                // flush
+                self.set_block_state(a, I)
+                return flush_time()
+        M =>
+            BusRd =>
+                // flush
+                self.set_block_state(a, S)
+                return flush_time()
+            BusRdX =>
+                // flush
+                self.set_block_state(a, I)
+                return flush_time()
+    Dragon =>
+        I => pass
+        E =>
+            BusRd =>
+                self.set_block_state(a, Sc)
+            BusUpd => error
+        Sc => pass  // update local on BusUpd
+        Sm =>
+            BusRd =>
+                // flush
+                return flush_time()
+            BusUpd =>
+                self.set_block_state(a, Sc)
+        M =>
+            BusRd =>
+                self.set_block_state(a, Sm)
+            BusUpd => error
+    return 0
+        
+
+bus.tick(cycle)
+    // the bus is ticked last, after processor and after cache
+    
+    // previous state
+    
+    if Busy(t)
+        if t-1 == 0
+            Idle
+        else
+            Busy(t-1)
+    
+    // current state
+    
+    if Idle
+        if fetch_msg('caches') is Some(msg)
+            self.intermediate_busy_time = 0
+            t = msg.cache.pr_sig_bus_ready(msg) + self.intermediate_busy_time
+            Busy(t)
+
+bus.send_sig(origin, cache)
+    for c in self.caches \ [cache]
+        self.intermediate_busy_time +=
+            c.bus_sig(sig)
+
+ask_other_caches_time()
+    2 * 32/WORD_SIZE
+        
+cache2cache_transfer_time()
+    2 * BLOCK_SIZE
+
+flush_time()
+    2 * BLOCK_SIZE
