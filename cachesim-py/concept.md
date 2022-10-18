@@ -48,7 +48,7 @@ New apporach:
 processor.tick()
     // processor is ticked first
     
-    // previous state 
+    // update state
 
     match state
     WaitingForCache =>
@@ -61,7 +61,7 @@ processor.tick()
         else
             ExecutingOther(n-1)
     
-    // current state
+    // proceed
     
     match state
     Ready =>
@@ -90,6 +90,18 @@ cache.tick()
         else
             ResolvingRequest(r, t-1)
 
+cache.hit(r)
+    // because the cache is ticked after the processor, we need to immediately
+    // communicate proceed to the processor if hit latency is 0 cycles (i.e.
+    // processor can use result in next cycle)
+
+    match times.cache_hit
+    0 =>
+        processor.proceed()
+        Idle
+    t =>
+        ResolvingRequest(r, t)
+
 cache.pr_sig(sig)
     match Protocol
     MESI =>
@@ -100,32 +112,26 @@ cache.pr_sig(sig)
                 bus.acquire(self)
                 WaitingForBus(sig)
             Write(a) =>
-                processor.proceed()
                 bus.send_tx(self, BusRdX(a))
                 set_block_state(a, M)
-                Idle
+                state = hit(sig)
         S =>    // hit
             match sig
             Read(a) =>
-                processor.proceed()
-                Idle
+                state = hit(sig)
             Write(a) =>
-                processor.proceed()
                 bus.send_tx(self, BusRdX(a))
                 set_block_state(a, M)
-                Idle
+                state = hit(sig)
         E =>    // hit
             match sig
             Read(a) =>
-                processor.proceed()
-                Idle
+                state = hit(sig)
             Write(a) =>
-                processor.proceed()
                 set_block_state(a, M)
-                Idle
+                state = hit(sig)
         M =>    // hit
-            processor.proceed()
-            Idle
+            state = hit(sig)
     Dragon =>
         match block state
         I =>    // miss
@@ -134,31 +140,26 @@ cache.pr_sig(sig)
         E =>    // hit
             match sig
             Read(a) =>
-                processor.proceed()
-                Idle
+                state = hit(sig)
             Write(a) =>
-                processor.proceed()
                 self.set_block_state(a, M)
-                Idle
+                state = hit(sig)
         Sc =>   // hit
             match sig
             Read(a) =>
-                processor.proceed()
-                Idle
+                state = hit(sig)
             Write(a) =>
                 bus.acquire(self)
                 WaitingForBus(sig)
         Sm =>   // hit
             match sig
             Read(a) =>
-                processor.proceed()
-                Idle
+                state = hit(sig)
             Write(a) =>
                 bus.acquire(self)
                 WaitingForBus(sig)
         M =>    // hit
-            processor.proceed()
-            Idle
+            state = hit(sig)
 
 cache.on_bus_ready(msg) -> int
     // returns the number of cycles the bus will be busy
