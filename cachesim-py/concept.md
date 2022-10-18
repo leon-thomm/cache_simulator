@@ -23,10 +23,10 @@
     - those that require communication with other caches and possibly memory. The latter need to wait for the bus to be free (transition ambiguous, need more information), in order to lock it and then start talking to other components
 4. This is not the case for *bus updates* in MESI and Dragon, these can always be handled immediately
 
-=> Let $C_0$ be a cache processing a processor request on address $a$ requiring commmunication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $a$ as well. By owning the bus, $C_0$ ensures the following
+=> Let $C_0$ be a cache processing a processor request on $a$ in block $b$ requiring commmunication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $b$ as well. By owning the bus, $C_0$ ensures the following
 
 * **either** $C_1$ is blocked from its transition (if it requires sending and receiving on bus) until $C_0$ is done and the system never enters an invalid state
-* **or** $C_1$'s transition does not require sending and receiving on bus (i.e. only sending, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $a$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done and the bus is freed
+* **or** $C_1$'s transition does not require sending and receiving on bus (i.e. only sending, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $b$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done and the bus is freed
 
 => When $C_0$ owns the bus, for any processor request the simulator can determistically fully determine the time that the bus would be busy until all operations necessary to answer the request are finished.
 
@@ -103,6 +103,23 @@ cache.hit(r)
         Idle
     t =>
         ResolvingRequest(r, t)
+
+cache.access(a)
+    // manages the LRU policy when address a is accessed
+    b = block_of_addr(a)
+    s = set_of_block(b)
+    if b in s:
+        // shift b to end to indicate it was recently used
+        s.remove(b)
+        s.append(b)
+        // no replacement necessary
+        return 0
+    else:
+        // replace LRU block
+        b_lru = s[0]
+        s.remove(b_lru)
+        s.append(b)
+        return times.flush()
 
 cache.pr_sig(sig)
     match Protocol
@@ -233,6 +250,7 @@ cache.on_bus_ready(msg) -> int
         M => error
         
     state = ResolvingRequest(t)
+    t += access(a)  # employ LRU policy
 
     return t
 
@@ -249,7 +267,7 @@ cache.bus_sig(sig) -> int
         E =>
             match sig
             BusRd =>
-                // flush
+                // writeback
                 set_block_state(a, S)
                 return times.flush_time()
             BusRdX =>
@@ -258,7 +276,7 @@ cache.bus_sig(sig) -> int
                 return flush_time()
         M =>
             BusRd =>
-                // flush
+                // writeback
                 set_block_state(a, S)
                 return flush_time()
             BusRdX =>
@@ -277,7 +295,7 @@ cache.bus_sig(sig) -> int
         Sm =>
             match sig
             BusRd =>
-                // flush
+                // writeback
                 return times.flush_time()
             BusUpd =>
                 set_block_state(a, Sc)
