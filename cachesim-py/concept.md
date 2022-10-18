@@ -1,8 +1,8 @@
 ### Detailed specifications and assumptions
 
-- a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response
+- a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response (*)
 - a cache communicates with other caches through the bus, and the bus is "owned" (locked) by a cache until it completely finished his transactions corresponding to one transition in the state diagram
-- any cache can always immediately respond to bus requests. if the cache gets asked to deliver a block which is currently evicting, the block is assumed as invalid
+- any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
 - the system always prefers cache-to-cache transfer if any other cache has the line cached (Illionis style for MESI)
 - if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
 - the time for sending a bus transaction (address and transaction code) to other caches takes 2 cycles - just as long as sending only an address
@@ -12,30 +12,32 @@
 - the memory is word-addressible not, byte-addressible
 - memory is generally only updated on eviction/flushing
 
+(*): as stated in the task description
+
 ### Key insights
 
 1. The bus can only do one thing at a time, it serializes all requests.
 2. All memory transfer goes through the bus.
-
-    => When the bus is locked/ownded by some cache $C_j$ processing a processor request that requires communication with other parts (caches, memory), during the time of that communication, the system cannot undergo a state change initiated from another cache $C_k$ that would render $C_j$'s operations invalid, because any such state change would require communication over the bus, which is locked/owned by $C_j$.
-    
-    => When $C_j$ owns the bus, for any processor request we (the simulator) can determistically fully determine the time that the bus would be busy until all operations necessary to answer the request are finished.
-
-3. Implementation suggests a lot of nested and bidirectional communication between the different parts
-    
-    => Clock-based message queueing system ? 
-    
-    => No, use locking! From the perspective of some cache $C_j$, the bus can be:
-    - owned: $C_j$ can send bus requests
-    - foreign owned: $C_j$ can respond to incoming bus requests - owner is responsible of preventing conflicts
-    - free: $C_j$ can try to lock the bus in order to start sending requests
-
-4. There are two types of processor events for the cache:
+3. There are two types of *processor events* for the cache:
     - those that can be answered right away (unique transition)
     - those that require communication with other caches and possibly memory. The latter need to wait for the bus to be free (transition ambiguous, need more information), in order to lock it and then start talking to other components
-5. This is not the case for bus updates in MESI and Dragon, these can always be handled immediately
+4. This is not the case for *bus updates* in MESI and Dragon, these can always be handled immediately
+
+=> Let $C_0$ be a cache processing a processor request on address $a$ requiring commmunication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $a$ as well. By owning the bus, $C_0$ ensures the following
+
+* **either** $C_1$ is blocked from its transition (if it requires sending and receiving on bus) until $C_0$ is done and the system never enters an invalid state
+* **or** $C_1$'s transition does not require sending and receiving on bus (i.e. only sending, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $a$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done and the bus is freed
+
+=> When $C_0$ owns the bus, for any processor request the simulator can determistically fully determine the time that the bus would be busy until all operations necessary to answer the request are finished.
+
+From the perspective of some cache $C_i$, the bus can be:
+
+* owned: $C_i$ can send bus requests
+* foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
+* free: $C_i$ can try to lock the bus in order to start sending requests
 
 
+***
 
 
 New apporach:
@@ -95,7 +97,7 @@ cache.hit(r)
     // communicate proceed to the processor if hit latency is 0 cycles (i.e.
     // processor can use result in next cycle)
 
-    match times.cache_hit
+    match times.cache_hit()
     0 =>
         processor.proceed()
         Idle
@@ -114,7 +116,9 @@ cache.pr_sig(sig)
             Write(a) =>
                 bus.send_tx(self, BusRdX(a))
                 set_block_state(a, M)
-                state = hit(sig)
+                // not a hit, but MESI proceeds immediately
+                processor.proceed()
+                state = Idle
         S =>    // hit
             match sig
             Read(a) =>
@@ -312,9 +316,10 @@ bus.send_tx(origin, cache)
         intermediate_busy_time += c.bus_sig(sig)
 
 times {
-    ask_other_caches:       2 * 32/WORD_SIZE
+    ask_other_caches:       2 * 32//WORD_SIZE
     cache2cache_transfer:   2 * BLOCK_SIZE
     flush:                  2 * BLOCK_SIZE
     memory_fetch:           100
+    cache_hit:              0
 }
 ```
