@@ -55,6 +55,8 @@ processor.tick()
     match state
     WaitingForCache =>
         return
+    Done =>
+        return
     ReadyToProceed =>
         Ready
     ExecutingOther(n) =>
@@ -76,9 +78,11 @@ processor.tick()
             WaitingForCache
         on other(t)
             ExecutingOther(t-1)
+        on finished
+            Done
 
 processor.proceed()
-    styte = ReadyToProceed
+    state = ReadyToProceed
 
 cache.tick()
     // cache is ticked second, after processor
@@ -92,98 +96,124 @@ cache.tick()
         else
             ResolvingRequest(r, t-1)
 
-cache.hit(r)
-    // because the cache is ticked after the processor, we need to immediately
-    // communicate proceed to the processor if hit latency is 0 cycles (i.e.
-    // processor can use result in next cycle)
-
-    match times.cache_hit()
-    0 =>
-        processor.proceed()
-        Idle
-    t =>
-        ResolvingRequest(r, t)
-
 cache.access(a)
-    // manages the LRU policy when address a is accessed
+    // access a *cached* address - updates the LRU state
+
     b = block_of_addr(a)
     s = set_of_block(b)
-    if b in s:
-        // shift b to end to indicate it was recently used
-        s.remove(b)
-        s.append(b)
-        // no replacement necessary
-        return 0
-    else:
-        // replace LRU block
-        b_lru = s[0]
-        s.remove(b_lru)
-        s.append(b)
-        return times.flush()
+    if b not in s:
+        error
+    // shift b to end to indicate it was recently used
+    s.remove(b)
+    s.append(b)
+    // no replacement necessary
+
+cache.add(a, state)
+    // employ LRU replacement policy
+
+    b = block_of_addr(a)
+    s = set_of_block(b)
+    
+    s.remove(b)
+    match Protocol
+    MESI =>
+        match block.state
+        Modified =>
+            t = times.flush()
+    Dragon =>
+        match block.state
+        Modified, SharedModified =>
+            t = times.flush()
+
+    s.append(b, state)
+    return t
 
 cache.pr_sig(sig)
+    // there are two types of signals:
+    // * those which can be handled immediately
+    // * those which require communication with other caches and possibly memory over the bus
+    // the latter type of signals are handled once we own the bus
+
+    def hit_imm():
+        """handle an immediate hit, i.e. without bus communication"""
+        access(a)
+        match times.cache_hit()
+        0 =>
+            processor.proceed()
+            Idle
+        t =>
+            ResolvingRequest(r, t)
+    
+    def acquire_bus():
+        bus.acquire(self)
+        WaitingForBus(sig)
+
+
     match Protocol
     MESI =>
         match block state
         I =>    // miss
             match sig
             Read(a) =>
-                bus.acquire(self)
-                WaitingForBus(sig)
+                acquire_bus()
             Write(a) =>
                 bus.send_tx(self, BusRdX(a))
-                set_block_state(a, M)
+                transition(a, M)
                 // not a hit, but MESI proceeds immediately
                 processor.proceed()
+                access(a)
                 state = Idle
         S =>    // hit
             match sig
             Read(a) =>
-                state = hit(sig)
+                state = hit_imm()
             Write(a) =>
                 bus.send_tx(self, BusRdX(a))
-                set_block_state(a, M)
-                state = hit(sig)
+                transition(a, M)
+                state = hit_imm()
         E =>    // hit
             match sig
             Read(a) =>
-                state = hit(sig)
+                state = hit_imm()
             Write(a) =>
-                set_block_state(a, M)
-                state = hit(sig)
+                transition(a, M)
+                state = hit_imm()
         M =>    // hit
-            state = hit(sig)
+            state = hit_imm()
     Dragon =>
         match block state
         I =>    // miss
-            bus.acquire(self)
-            WaitingForBus(sig)
+            acquire_bus()
         E =>    // hit
             match sig
             Read(a) =>
-                state = hit(sig)
+                state = hit_imm()
             Write(a) =>
-                self.set_block_state(a, M)
-                state = hit(sig)
+                self.transition(a, M)
+                state = hit_imm()
         Sc =>   // hit
             match sig
             Read(a) =>
-                state = hit(sig)
+                state = hit_imm()
             Write(a) =>
-                bus.acquire(self)
-                WaitingForBus(sig)
+                acquire_bus()
         Sm =>   // hit
             match sig
             Read(a) =>
-                state = hit(sig)
+                state = hit_imm()
             Write(a) =>
-                bus.acquire(self)
-                WaitingForBus(sig)
+                acquire_bus()
         M =>    // hit
-            state = hit(sig)
+            state = hit_imm()
 
 cache.on_bus_ready(msg) -> int
     // returns the number of cycles the bus will be busy
+    t = 0
+
+    if a is cached:
+        access(a)
+    else:
+        t += add(a, I)
 
     match Protocol
     MESI =>
@@ -192,11 +222,15 @@ cache.on_bus_ready(msg) -> int
             match msg
             Read(a) =>
                 if other cache has cache line -> transfer
-                    t = times.ask_other_caches() + times.cache2cache_transfer()
-                    set_block_state(a, S)
+                    t += 
+                        times.ask_other_caches() + 
+                        times.cache2cache_transfer() +
+                    transition(a, S)
                 else
-                    t = times.ask_other_caches() + times.memory_fetch()
-                    set_block_state(a, E)
+                    t += 
+                        times.ask_other_caches() + 
+                        times.memory_fetch() +
+                    transition(a, E)
             Write(a) => error
         _ => error
     Dragon =>
@@ -205,52 +239,56 @@ cache.on_bus_ready(msg) -> int
             match msg
             Read(a) =>
                 if other cache has cache line -> transfer
-                    t = times.ask_other_caches() + times.cache2cache_transfer()
+                    t += 
+                        times.ask_other_caches() + 
+                        times.cache2cache_transfer()
                     bus.send_tx(self, BusRd(a))
-                    set_block_state(a, Sc)
+                    transition(a, Sc)
                 else
-                    t = times.ask_other_caches() + times.memory_fetch()
-                    bus.send_tx(self, BusRd(a))
-                    bus.send('transaction', (self, BusRd(a)))
-                    set_block_state(a, E)
+                    t += 
+                        times.ask_other_caches() + 
+                        times.memory_fetch()
+                    bus.send_tx(self, BusRdX(a))
+                    transition(a, E)
             Write(a) =>
                 if other cache has line
-                    t = times.ask_other_caches() + times.cache2cache_transfer()
-                    set_block_state(a, Sm)
+                    t += 
+                        times.ask_other_caches() + 
+                        times.cache2cache_transfer()
+                    transition(a, Sm)
                     bus.send_tx(self, BusRd(a))
                     bus.send_tx(self, BusUpd(a))
                 else
-                    t = times.ask_other_caches() + times.memory_fetch()
-                    set_block_state(a, M)
-                    bus.send_tx(self, BusRd(a))
+                    t += times.ask_other_caches() + times.memory_fetch()
+                    transition(a, M)
+                    bus.send_tx(self, BusRdX(a))
         E => error
         Sc =>
             match msg
             Read(a) => error
             Write(a) =>
                 if other cache has cache line
-                    t = times.ask_other_caches()
-                    set_block_state(a, Sm)
+                    t += times.ask_other_caches()
+                    transition(a, Sm)
                     bus.send_tx(self, BusUpd(a))
                 else
-                    t = times.ask_other_caches()
-                    set_block_state(a, M)
+                    t += times.ask_other_caches()
+                    transition(a, M)
                     bus.send_tx(self, BusUpd(a))
         Sm =>
             match msg
             Read(a) => error
             Write(a) => 
                 if other cache has cashe ilne
-                    t = times.ask_other_caches()
+                    t += times.ask_other_caches()
                     bus.send_tx(self, BusUpd(a))
                 else
-                    t = times.ask_other_caches()
+                    t += times.ask_other_caches()
                     bus.send_tx(self, BusUpd(a))
-                    set_block_state(a, M)
+                    transition(a, M)
         M => error
-        
+    
     state = ResolvingRequest(t)
-    t += access(a)  # employ LRU policy
 
     return t
 
@@ -263,46 +301,46 @@ cache.bus_sig(sig) -> int
             match sig
             BusRd => pass
             BusRdX =>
-                set_block_state(a, I)
+                transition(a, I)
         E =>
             match sig
             BusRd =>
                 // writeback
-                set_block_state(a, S)
-                return times.flush_time()
+                transition(a, S)
+                return times.flush()
             BusRdX =>
                 // flush
-                set_block_state(a, I)
-                return flush_time()
+                transition(a, I)
+                return times.flush()
         M =>
             BusRd =>
                 // writeback
-                set_block_state(a, S)
-                return flush_time()
+                transition(a, S)
+                return times.flush()
             BusRdX =>
                 // flush
-                set_block_state(a, I)
-                return flush_time()
+                transition(a, I)
+                return times.flush()
     Dragon =>
         match block state
         I => pass
         E =>
             match sig
             BusRd =>
-                set_block_state(a, Sc)
+                transition(a, Sc)
             BusUpd => error
         Sc => pass  // update local on BusUpd
         Sm =>
             match sig
             BusRd =>
                 // writeback
-                return times.flush_time()
+                return times.flush()
             BusUpd =>
-                set_block_state(a, Sc)
+                transition(a, Sc)
         M =>
             match sig
             BusRd =>
-                set_block_state(a, Sm)
+                transition(a, Sm)
             BusUpd => error
     return 0
         
@@ -310,7 +348,7 @@ cache.bus_sig(sig) -> int
 bus.tick(cycle)
     // the bus is ticked last, after processor and after cache
     
-    // previous state
+    // update state
     
     match state
     Busy(t) =>
@@ -319,7 +357,7 @@ bus.tick(cycle)
         else
             Busy(t-1)
     
-    // current state
+    // proceed
     
     match state
     Idle =>
