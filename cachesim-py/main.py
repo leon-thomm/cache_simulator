@@ -70,9 +70,9 @@ class Processor:
                 if inst := self.instructions.pop(0):
                     # execute next instruction
                     match inst:
-                        case ('Read', addr):
+                        case ('PrRead', addr):
                             self.cache.pr_sig('PrRead', addr)
-                        case ('Write', addr):
+                        case ('PrWrite', addr):
                             self.cache.pr_sig('PrWrite', addr)
                         case ('Other', time):
                             self.state = ('ExecutingOther', time-1)
@@ -91,7 +91,7 @@ class Cache:
         self.data = {
             # addr: [(tag, state), ...]
             # last block is most recently used
-            idx: [(None, None)] * CACHE_ASSOC
+            idx: [[None, None]] * CACHE_ASSOC
             for idx in range((CACHE_SIZE//WORD_SIZE) // CACHE_ASSOC)
         }
         self.state = ('Idle',)
@@ -134,8 +134,8 @@ class Cache:
         if addr_in_set:
             # update MRU
             s = self.state_of(addr)
-            cache_set.remove((tag, s))
-            cache_set.append((tag, s))
+            cache_set.remove([tag, s])
+            cache_set.append([tag, s])
         else:
             raise Exception('Address not cached')
     
@@ -162,7 +162,7 @@ class Cache:
                         case 'M' | 'Sm':
                             t += Times.flush()
         
-        cache_set.append((tag, state))
+        cache_set.append([tag, state])
         return t
 
     def tick(self):
@@ -208,7 +208,7 @@ class Cache:
         
         def hit_imm():
             """handle an immediate hit, i.e. without bus communication"""
-            self.access(addr)
+            self.access_cached(addr)
             match Times.cache_hit():
                 case 0:
                     proc_proceed()
@@ -228,7 +228,7 @@ class Cache:
                             transition('M')
                             # not a hit, but MESI proceeds immediately
                             proc_proceed()
-                            idle():
+                            idle()
                 case 'S':
                     match event:
                         case 'PrRead':
@@ -274,15 +274,15 @@ class Cache:
                     hit_imm()
 
 
-    def pr_sig_bus_ready(self, sig) -> int:
-        event, addr = sig
+    def pr_sig_bus_ready(self) -> int:
+        event, addr = self.state[1]
         s = self.state_of(addr)
         t = 0
 
         if s != 'I':
             self.access_cached(addr)
         else:
-            t += self.add_block(addr)
+            t += self.add_block(addr, 'I')
 
         # shorthands
         def bus_send_tx(msg):
@@ -316,7 +316,7 @@ class Cache:
                                 transition('S')
                             else:
                                 t += \
-                                    Times.ask_other_caches_time() + \
+                                    Times.ask_other_caches() + \
                                     Times.mem_fetch()
                                 transition('E')
                         case _:
@@ -466,7 +466,7 @@ class Bus:
             case ('Idle',):
                 if c := self._cache_requests_queue.pop(0):
                     self._interm_busy_time = 0
-                    t = t.pr_sig_bus_ready() + self._interm_busy_time
+                    t = c.pr_sig_bus_ready() + self._interm_busy_time
                     self.state = ('Busy', t)
     
     def acquire(self, cache):
@@ -474,4 +474,42 @@ class Bus:
     
     def send_sig(self, origin_cache, sig):
         for cache in self.get_caches(exclude=origin_cache):
-            self.intermediate_busy_time += cache.bus_signal(sig)
+            self._interm_busy_time += cache.bus_sig(sig)
+
+
+def simulate(instructions):
+    n = len(instructions)
+    procs = [Processor(instructions[i]) for i in range(n)]
+    caches = [procs[i].cache for i in range(n)]
+    bus = Bus(caches)
+    for c in caches:
+        c.bus = bus
+
+    c = 0
+    while(not all([proc.state == ('Done',) for proc in procs])):
+        for proc in procs:
+            proc.tick()
+        for cache in caches:
+            cache.tick()
+        bus.tick()
+        c += 1
+    
+    return c
+
+if __name__=='__main__':
+    simulate([
+        [
+            ('PrRead', 0),
+			('Other', 3),
+			('PrRead', 1),
+			('Other', 2),
+			('PrWrite', 0),
+        ],
+		[
+            ('PrRead', 0),
+			('Other', 3),
+			('PrRead', 1),
+			('Other', 2),
+			('PrWrite', 0),
+		]
+    ])
