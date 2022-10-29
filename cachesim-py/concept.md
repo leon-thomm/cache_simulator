@@ -13,6 +13,7 @@
 - memory is generally only updated on eviction/flushing
 - the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI_protocol). I am assuming the state transitions on wikipedia
 - however, also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it on the talk page
+- bus locking must be fair between the caches (request queue)
 
 (*): as stated in the task description
 
