@@ -90,13 +90,13 @@ cache.tick()
     // cache is ticked second, after processor
     
     match state
-    ResolvingRequest(r, t) =>
+    ResolvingRequest(t) =>
         if t-1 == 0
             // processor can proceed with next instruction *in the next cycle*
             processor.proceed()
             Idle
         else
-            ResolvingRequest(r, t-1)
+            ResolvingRequest(t-1)
 
 cache.access(a)
     // access a *cached* address - updates the LRU state
@@ -144,7 +144,7 @@ cache.pr_sig(sig)
             processor.proceed()
             Idle
         t =>
-            ResolvingRequest(r, t)
+            ResolvingRequest(t)
     
     def acquire_bus():
         bus.acquire(self)
@@ -227,6 +227,7 @@ cache.on_bus_ready(msg) -> int
                     t += 
                         times.ask_other_caches() + 
                         times.cache2cache_transfer() +
+                    bus.send_tx(self, BusRd(a))
                     transition(a, S)
                 else
                     t += 

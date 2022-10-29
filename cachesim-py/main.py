@@ -71,12 +71,13 @@ class Processor:
 					inst = self.instructions.pop(0)
 					# execute next instruction
 					match inst:
+						# make sure to call cache *after* updating state, because cache might update proc state
 						case ('PrRead', addr):
+							self.state = ('WaitingForCache',)
 							self.cache.pr_sig('PrRead', addr)
-							self.state = ('WaitingForCache',)
 						case ('PrWrite', addr):
-							self.cache.pr_sig('PrWrite', addr)
 							self.state = ('WaitingForCache',)
+							self.cache.pr_sig('PrWrite', addr)
 						case ('Other', time):
 							self.state = ('ExecutingOther', time-1)
 				else:
@@ -149,7 +150,7 @@ class Cache:
 
 		index, tag = self.dcache_pos(addr)
 		set = self.data[index]
-		if any([tag_ == tag for tag_,_ in set]):
+		if any([tag_ == tag and state_ != 'I' for tag_,state_ in set]):
 			raise Exception('Address already cached')
 		set_is_full = len(set) == CACHE_ASSOC
 		s = self.state_of(addr)
@@ -320,6 +321,7 @@ class Cache:
 								t += \
 									Times.ask_other_caches() + \
 									Times.cache_to_cache_transf()
+								bus_send_tx(('BusRd', addr))
 								transition('S')
 							else:
 								t += \
@@ -418,7 +420,7 @@ class Cache:
 						case 'BusRdX':  transition('I')
 				case 'E':
 					match event:
-						case 'BusRd':   transition('S'); return Times.flush()
+						case 'BusRd':   transition('S'); # no flushing here, see assumptions
 						case 'BusRdX':  transition('I'); return Times.flush()
 				case 'M':
 					match event:
