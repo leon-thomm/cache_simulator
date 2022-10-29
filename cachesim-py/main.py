@@ -174,12 +174,12 @@ class Cache:
 	def tick(self):
 		# cache is ticked second, after processor
 		match self.state:
-			case ('ResolvingRequest', r, t):
+			case ('ResolvingRequest', t):
 				if t-1 == 0:
 					self.proc.proceed()
 					self.state = ('Idle',)
 				else:
-					self.state = ('ResolvingRequest', r, t-1)
+					self.state = ('ResolvingRequest', t-1)
 	
 	def pr_sig(self, event, addr):
 
@@ -202,7 +202,7 @@ class Cache:
 			self.state = ('Idle',)
 		
 		def res_req(t):
-			self.state = ('ResolvingRequest', event, t)
+			self.state = ('ResolvingRequest', t)
 		
 		def wait_for_bus():
 			self.state = ('WaitingForBus', (event, addr))
@@ -392,6 +392,8 @@ class Cache:
 				case 'M':
 					error()
 		
+		t -= 1	# account for current cycle
+
 		self.state = ('ResolvingRequest', t)
 
 		return t
