@@ -79,7 +79,12 @@ class Processor:
 							self.state = ('WaitingForCache',)
 							self.cache.pr_sig('PrWrite', addr)
 						case ('Other', time):
-							self.state = ('ExecutingOther', time-1)
+							if time > 0:
+								self.state = ('ExecutingOther', time-1)
+							else:
+								# allow for 0 time instructions
+								self.state = ('Ready',)
+								self.tick()
 				else:
 					self.state = ('Done',)
 	
@@ -466,7 +471,10 @@ class Bus:
 
 		match self.state:
 			case ('Busy', t):
-				if t-1 == 0:
+				# notice t here, not t-1; because the bus is ticked last 
+				# and another cache can only acquire the bus in the cycle 
+				# *after* the previes owner freed it
+				if t == 0:
 					self.state = ('Idle',)
 				else:
 					self.state = ('Busy', t-1)
@@ -499,12 +507,14 @@ def simulate(instructions):
 
 	c = 0
 	while(not all([proc.state == ('Done',) for proc in procs])):
+		if True: pass
 		for proc in procs:
 			proc.tick()
 		for cache in caches:
 			cache.tick()
 		bus.tick()
 		c += 1
+	c -= 1  # last cycle was only last processor jumping from ReadToProceed to Done
 	
 	return c
 
@@ -512,14 +522,14 @@ if __name__=='__main__':
 	print(simulate([
 		[
 			('PrRead', 0),
-			('Other', 3),
+			('Other', 0),
 			('PrRead', 1),
 			('Other', 2),
 			('PrWrite', 0),
 		],
 		[
 			('PrRead', 0),
-			('Other', 3),
+			('Other', 0),
 			('PrRead', 1),
 			('Other', 2),
 			('PrWrite', 0),
