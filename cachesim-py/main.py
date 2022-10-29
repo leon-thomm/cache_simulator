@@ -2,6 +2,7 @@
 
 from os import access
 from pickle import PROTO
+from xmlrpc.client import MAXINT
 
 
 PROTOCOL = 'MESI'
@@ -45,8 +46,10 @@ class Processor:
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
-	def tick(self):
+	def tick(self, cycles=1):
 		# processor is ticked first
+
+		# cycles invariant: if state is not WaitingForCache, then cycles == 1
 
 		# update state
 
@@ -61,7 +64,7 @@ class Processor:
 				if n == 0:
 					self.state = ('Ready',)
 				else:
-					self.state = ('ExecutingOther', n-1)
+					self.state = ('ExecutingOther', n-cycles)
 		
 		# proceed
 
@@ -177,15 +180,18 @@ class Cache:
 		set.append((tag, state))
 		return t
 
-	def tick(self):
+	def tick(self, cycles=1):
 		# cache is ticked second, after processor
+
+		# cycles invariant: if state is not ResolvingRequest, then cycles == 1
+
 		match self.state:
 			case ('ResolvingRequest', t):
-				if t-1 == 0:
+				if t-cycles == 0:
 					self.proc.proceed()
 					self.state = ('Idle',)
 				else:
-					self.state = ('ResolvingRequest', t-1)
+					self.state = ('ResolvingRequest', t-cycles)
 	
 	def pr_sig(self, event, addr):
 
@@ -332,6 +338,7 @@ class Cache:
 								t += \
 									Times.ask_other_caches() + \
 									Times.mem_fetch()
+								bus_send_tx(('BusRdX', addr))
 								transition('E')
 						case _:
 							error()
@@ -460,11 +467,12 @@ class Bus:
 		self.state = ('Idle',)
 		self._interm_busy_time = 0
 		self._cache_requests_queue = []
+		self._signals_queue = []
 	
 	def get_caches(self, exclude=None):
 		return [cache for cache in self.caches if cache != exclude]
 	
-	def tick(self):
+	def tick(self, cycles):
 		# the bus is ticked last, after processor and after cache
 
 		# update state
@@ -477,24 +485,35 @@ class Bus:
 				if t == 0:
 					self.state = ('Idle',)
 				else:
-					self.state = ('Busy', t-1)
+					self.state = ('Busy', t-cycles)
 		
 		# proceed
 
 		match self.state:
 			case ('Idle',):
-				if len(self._cache_requests_queue) > 0:
+
+				# first check if there are any signals to send
+				if len(self._signals_queue) > 0:
+					origin_cache, sig = self._signals_queue.pop(0)
+					self._interm_busy_time = Times.ask_other_caches()
+					for cache in self.get_caches(exclude=origin_cache):
+						self._interm_busy_time += cache.bus_sig(sig)
+					self._interm_busy_time -= 1  # account for current cycle
+					self.state = ('Busy', self._interm_busy_time)
+
+				# otherwise, hand over to next cache in queue
+				elif len(self._cache_requests_queue) > 0:
 					c = self._cache_requests_queue.pop(0)
 					self._interm_busy_time = 0
 					t = c.pr_sig_bus_ready() + self._interm_busy_time
+					# current cycle is already accounted for in pr_sig_bus_ready()
 					self.state = ('Busy', t)
 	
 	def acquire(self, cache):
 		self._cache_requests_queue.append(cache)
 	
 	def send_sig(self, origin_cache, sig):
-		for cache in self.get_caches(exclude=origin_cache):
-			self._interm_busy_time += cache.bus_sig(sig)
+		self._signals_queue.append((origin_cache, sig))
 
 
 def simulate(instructions):
@@ -504,16 +523,31 @@ def simulate(instructions):
 	bus = Bus(caches)
 	for c in caches:
 		c.bus = bus
+	
+	def bus_is_busy():
+		return bus.state[0] == 'Busy' and bus.state[1] > 0
 
 	c = 0
 	while(not all([proc.state == ('Done',) for proc in procs])):
-		if True: pass
+
+		# optimize
+		# min_wait = min([
+		# 	p.state[1] if p.state[0] == 'ExecutingOther' else (
+		# 	c.state[1] if c.state[0] == 'ResolvingRequest' else (
+		# 	MAXINT if c.state[0] == 'WaitingForBus' else (
+		# 	0
+		# 	)))
+		# 	for (p, c) in zip(procs, caches)
+		# ])
+		# t = 1 if min_wait == 0 else min_wait
+		t = 1
+
 		for proc in procs:
-			proc.tick()
+			proc.tick(t)
 		for cache in caches:
-			cache.tick()
-		bus.tick()
-		c += 1
+			cache.tick(t)
+		bus.tick(t)
+		c += t
 	c -= 1  # last cycle was only last processor jumping from ReadToProceed to Done
 	
 	return c
@@ -522,14 +556,14 @@ if __name__=='__main__':
 	print(simulate([
 		[
 			('PrRead', 0),
-			('Other', 0),
+			('Other', 3),
 			('PrRead', 1),
 			('Other', 2),
 			('PrWrite', 0),
 		],
 		[
 			('PrRead', 0),
-			('Other', 0),
+			('Other', 3),
 			('PrRead', 1),
 			('Other', 2),
 			('PrWrite', 0),
