@@ -1,19 +1,31 @@
 ### Detailed specifications and assumptions
 
+**processor behavior**
+
 - a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response (*)
+
+**bus behavior**
+
 - a cache communicates with other caches through the bus, and the bus is "owned" (locked) by a cache until it completely finished his transactions corresponding to one transition in the state diagram
-- any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
-- the system always prefers cache-to-cache transfer if any other cache has the line cached (Illionis style for MESI)
+- bus locking must be fair between the caches (request queue)
 - the time for sending a bus transaction (address and transaction code) to other caches takes 2 cycles - just as long as sending only an address
+
+**cache behavior**
+
+- any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
 - while the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illionis and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it
+- the system always prefers cache-to-cache transfer
+
+**further system and timing specs**
+
+- if cache $C_0$ tries to cache a block $b$, the action of asking other caches whether they have $b$, and the action of sending the bus signal resulting from the following transition in $C_0$ are two separate steps which both require bus communication; i.e. we ignore the fact that the other caches could theoretically infer some of these bus transactions from $C_0$'s asking
 - arbitration policy: the processor/cache with lower id is preferred
-    - e.g. if P0 and P1 want to write to the same block in the same cycle, P0 will proceed and P1 will have to evict
+    - e.g. if P0 and P1 want to write to the same block in the same cycle, P0 will proceed and P1 will have to adapt if necessary
 - if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
 - the memory is word-addressible not, byte-addressible
 - memory is generally only updated on eviction/flushing
 - the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI_protocol). I am assuming the state transitions on wikipedia
 - also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it
-- bus locking must be fair between the caches (request queue)
 - the caches do not flush their dirty lines at the end of the simulation - the system is assumed to run indefinitely
 
 (*): as stated in the task description
