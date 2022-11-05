@@ -4,6 +4,24 @@ use std::sync::mpsc;
     A MESI and Dragon cache coherence protocol simulator.
  */
 
+// addresses
+
+#[derive(Clone)]
+struct Addr(i32);
+
+impl Addr {
+    fn new(addr: i32) -> Addr {
+        Addr(addr)
+    }
+    fn pos(&self, specs: &SystemSpec) -> (i32, i32) {
+        // returns the index and tag and index of the address under given system specs
+        let num_indices = specs.cache_size / (specs.block_size * specs.cache_assoc);
+        let index = self.0 % num_indices;
+        let tag = self.0 / num_indices;
+        (index, tag)
+    }
+}
+
 // messages
 
 enum Msg {
