@@ -4,14 +4,46 @@ use std::sync::mpsc;
     A MESI and Dragon cache coherence protocol simulator.
  */
 
+enum Msg {
+    ProcToCache(i32, CacheMsg),
+    CacheToProc(i32, ProcMsg),
+    CacheToBus(i32, BusMsg),
+    BusToCache(i32, CacheMsg),
 
-enum Msg{}
+    TickProc(i32),
+    TickCache(i32),
+    TickBus,
+}
 
-// message with cycle delay
-struct QMsg<MsgType>(i32, MsgType);
+enum ProcMsg {
+    Tick,
+    RequestResolved,
+}
+
+enum CacheMsg {
+    Tick,
+    Read(i32),
+    Write(i32),
+    BusSignal(BusSignal),
+}
+
+enum CacheToBusMsg {
+    StayBusy(usize, usize),
+    SendSignal()
+}
+
+// optional callback receiver for the bus
+type OptCb = Option<Component::Cache(i32)>;
+
+enum BusMsg {
+    Tick,
+    StayBusy(i32, OptCb),
+    SendSignal(BusSignal, OptCb, OptCb),
+}
 
 
 fn simulate(insts: Vec<Vec<Instruction>>) {
+
     let n = insts.len();
 
     // each component (processors, caches, bus) communicates to others by sending messages
@@ -22,32 +54,59 @@ fn simulate(insts: Vec<Vec<Instruction>>) {
 
     let (tx, rx) = mpsc::channel();
 
-    fn tx_with_delay<MsgType>(tx: mpsc::Sender<QMsg<MsgType>>) -> fn(i32, MsgType) {
-        | delay: i32, msg: MsgType | {
-            tx.send(QMsg(delay, msg)).unwrap();
-        }
-    }
-
     let procs = (0..n).map(|i| {
-        Processor::new(i, tx_with_delay(tx.clone()), insts[i].clone())
+        Processor::new(i, tx.clone(), insts[i].clone())
     }).collect::<Vec<_>>();
 
     let caches = (0..n).map(|i| {
-        Cache::new(i, tx_with_delay(tx.clone()))
+        Cache::new(i, tx.clone())
     }).collect::<Vec<_>>();
 
-    let bus = Bus::new(tx_with_delay(tx.clone()));
+    let bus = Bus::new(tx.clone());
 
     // simulate
-    let cycle_count = 0;
+    let mut cycle_count = 0;
     loop {
-        // tick all processors
+        // tick everyone -- THE ORDER SHOULD NOT MATTER!!
         for i in 0..n {
-            tx.send(Message::Tick(i, 1)).unwrap();
+            tx.send(Msg::TickProc(i)).unwrap();
+            tx.send(Msg::TickCache(i)).unwrap();
         }
+        tx.send(Msg::TickBus).unwrap();
 
-        while let Ok(msg) = rx.try_recv
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::ProcToCache(i, msg) => {
+                    caches[i].handle_msg(msg);
+                },
+                Msg::CacheToProc(i, msg) => {
+                    procs[i].handle_msg(msg);
+                },
+                Msg::CacheToBus(i, msg) => {
+                    bus.handle_msg(i, msg);
+                },
+                Msg::BusToCache(i, msg) => {
+                    caches[i].handle_msg(msg);
+                },
+                Msg::TickProc(i) => {
+                    procs[i].tick();
+                },
+                Msg::TickCache(i) => {
+                    caches[i].tick();
+                },
+                Msg::TickBus => {
+                    bus.tick();
+                },
+            }
+        }
+        cycle_count += 1;
+
+        // if all procs done, break
+        if procs.iter().all(|p| p.done()) {
+            break;
+        }
     }
+    println!("cycles: {}", cycle_count);
 }
 
 
@@ -57,11 +116,11 @@ fn main() {
     tx.send(MessageType::Msg("Hello".to_string())).unwrap();
     tx.send(MessageType::Msg("World".to_string())).unwrap();
 
-    loop {
-        match rx.recv() {
-            Ok(MessageType::Msg(msg)) => println!("{}", msg),
-            Ok(MessageType::Quit) => break,
-            Err(_) => break,
-        }
-    }
+    // loop {
+    //     match rx.recv() {
+    //         Ok(MessageType::Msg(msg)) => println!("{}", msg),
+    //         Ok(MessageType::Quit) => break,
+    //         Err(_) => break,
+    //     }
+    // }
 }
