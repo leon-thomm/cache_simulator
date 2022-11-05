@@ -130,15 +130,37 @@ impl Processor {
         todo!()
     }
 }
+
+// caches
+
+enum CacheState {
+    Idle,
+    ResolvingRequest(i32),
+    WaitingForBus,
 }
 
-// optional callback receiver for the bus
-type OptCb = Option<Component::Cache(i32)>;
+struct Cache {
+    id: i32,
+    state: CacheState,
+    tx: mpsc::Sender<Msg>,
+}
 
-enum BusMsg {
-    Tick,
-    StayBusy(i32, OptCb),
-    SendSignal(BusSignal, OptCb, OptCb),
+impl Cache {
+    fn new(id: i32, tx: mpsc::Sender<Msg>) -> Self {
+        Cache {
+            id,
+            state: CacheState::Idle,
+            tx,
+        }
+    }
+    fn tick(&mut self) {
+        todo!()
+    }
+    fn handle_msg(&mut self, msg: CacheMsg) {
+        todo!()
+    }
+}
+
 }
 
 
