@@ -46,7 +46,7 @@ class Processor:
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
-	def prepare_tick(self):
+	def prepare(self):
 		# update state
 
 		match self.state:
@@ -193,7 +193,7 @@ class Cache:
 		set.append((tag, state))
 		return t
 	
-	def prepare_tick(self):
+	def prepare(self):
 		match self.state:
 			case ('ResolvingRequest', 0):
 				self.proc.proceed()
@@ -493,7 +493,7 @@ class Bus:
 	def get_caches(self, exclude=None):
 		return [cache for cache in self.caches if cache != exclude]
 	
-	def prepare_tick(self):
+	def prepare(self):
 		match self.state:
 			case ('Busy', 0):
 				self.state = ('Idle',)
@@ -573,11 +573,11 @@ def simulate(instructions):
 		cycle_count += t
 
 		# prepare components for next cycle; clean state
-		bus.prepare_tick()
+		bus.prepare()
 		for c in caches:
-			c.prepare_tick()
+			c.prepare()
 		for p in procs:
-			p.prepare_tick()
+			p.prepare()
 
 
 	# bus might still be busy
@@ -605,7 +605,7 @@ if __name__=='__main__':
 			('Other', 2),
 			('PrWrite', 0),
 		]
-	] # expected: 251
+	] 	# expected: 352
 
 	TEST_2_PAYLOAD = [ 
 		[ 
@@ -613,7 +613,7 @@ if __name__=='__main__':
 			('PrWrite', 512), 
 			('PrWrite', 1024), 
 		] 
-	]
+	]	# expected: 104
 
 
-	print(simulate(TEST_1_PAYLOAD))
+	print(simulate(TEST_2_PAYLOAD))
