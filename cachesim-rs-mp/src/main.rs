@@ -4,6 +4,8 @@ use std::sync::mpsc;
     A MESI and Dragon cache coherence protocol simulator.
  */
 
+// messages
+
 enum Msg {
     ProcToCache(i32, CacheMsg),
     CacheToProc(i32, ProcMsg),
@@ -27,9 +29,16 @@ enum CacheMsg {
     BusSignal(BusSignal),
 }
 
-enum CacheToBusMsg {
-    StayBusy(usize, usize),
-    SendSignal()
+enum BusMsg {
+    StayBusy(i32, i32),
+    SendSignal(i32, BusSignal),
+}
+
+enum BusSignal {
+    BusRd(Addr),
+    BusRdX(Addr),
+}
+
 }
 
 // optional callback receiver for the bus
