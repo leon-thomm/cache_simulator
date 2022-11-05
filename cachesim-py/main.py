@@ -130,12 +130,23 @@ class Cache:
 		"""sets the state of the block containing the address"""
 		index, tag = self.dcache_pos(addr)
 		set = self.data[index]
-		for i, (tag_, state_) in enumerate(set):
-			if tag_ == tag:
-				set[i] = (tag_, state)
-				break
+		if state == 'I':
+			# remove block
+			set.remove((tag, state))
 		else:
-			raise Exception('Block not found')
+			for i, (tag_, state_) in enumerate(set):
+				if tag_ == tag:
+					set[i] = (tag_, state)
+					break
+			else:
+				raise Exception('Block not found')
+	
+	def lru(self, index):
+		"""returns the least recently used block in the set"""
+		set = self.data[index]
+		if len(set) == 0:
+			raise Exception('LRU of empty set')
+		return set[0]
 	
 	def access_cached(self, addr):
 		"""maintains the LRU policy"""
@@ -153,7 +164,7 @@ class Cache:
 		else:
 			raise Exception('Address not cached')
 	
-	def add_block(self, addr, state) -> int:
+	def access_uncached(self, addr, state) -> int:
 		"""caches a currently uncached and, if necessary, evicts and returns bus busy time for eviction"""
 
 		index, tag = self.dcache_pos(addr)
@@ -161,18 +172,18 @@ class Cache:
 		if any([tag_ == tag and state_ != 'I' for tag_,state_ in set]):
 			raise Exception('Address already cached')
 		set_is_full = len(set) == CACHE_ASSOC
-		s = self.state_of(addr)
 
 		t = 0
 		if set_is_full:
+			lru_state = self.lru(index)[1]
 			# evict LRU
 			match PROTOCOL:
 				case 'MESI':
-					match s:
+					match lru_state:
 						case 'M':
 							t += Times.flush()
 				case 'Dragon':
-					match s:
+					match lru_state:
 						case 'M' | 'Sm':
 							t += Times.flush()
 			set.pop(0)
@@ -198,6 +209,10 @@ class Cache:
 		s = self.state_of(addr)
 
 		# some helper functions to simplify syntax below
+
+		def access_causes_flush():
+			index, tag = self.dcache_pos(addr)
+			return s == 'I' and len(self.data[index]) == CACHE_ASSOC
 
 		# shorthands
 		def proc_proceed():
@@ -242,12 +257,14 @@ class Cache:
 						case 'PrRead':
 							acquire_bus()
 						case 'PrWrite':
-							bus_send_tx(('BusRdX', addr))
-							self.add_block(addr, 'E')
-							transition('M')
-							# not a hit, but MESI proceeds immediately
-							proc_proceed()
-							idle()
+							if access_causes_flush():
+								acquire_bus()
+							else:
+								bus_send_tx(('BusRdX', addr))
+								self.access_uncached(addr, 'M')
+								# not a hit, but MESI proceeds immediately
+								proc_proceed()
+								idle()
 				case 'S':
 					match event:
 						case 'PrRead':
@@ -301,7 +318,7 @@ class Cache:
 		if s != 'I':
 			self.access_cached(addr)
 		else:
-			t += self.add_block(addr, 'I')
+			t += self.access_uncached(addr, 'I')
 
 		# shorthands
 		def bus_send_tx(msg):
@@ -340,8 +357,11 @@ class Cache:
 									Times.mem_fetch()
 								bus_send_tx(('BusRdX', addr))
 								transition('E')
-						case _:
-							error()
+						case 'PrWrite':
+							# means we had to flush
+							# t is already set and address is added above
+							bus_send_tx(('BusRdX', addr))
+							transition('M')
 				case _:
 					error()
 		
@@ -465,7 +485,7 @@ class Bus:
 		
 		self.caches = caches
 		self.state = ('Idle',)
-		self._interm_busy_time = 0
+		self.pending_busy_time = 0
 		self._cache_requests_queue = []
 		self._signals_queue = []
 	
@@ -492,20 +512,26 @@ class Bus:
 		match self.state:
 			case ('Idle',):
 
-				# first check if there are any signals to send
-				if len(self._signals_queue) > 0:
+				# check if there is pending busy time
+				if self.pending_busy_time > 0:
+					t = self.pending_busy_time - 1	# account for current cycle
+					self.state = ('Busy', t)
+					self.pending_busy_time = 0
+
+				# check if there are any bus signals to send
+				elif len(self._signals_queue) > 0:
 					origin_cache, sig = self._signals_queue.pop(0)
-					self._interm_busy_time = Times.ask_other_caches()
+					self.pending_busy_time = Times.ask_other_caches()
 					for cache in self.get_caches(exclude=origin_cache):
-						self._interm_busy_time += cache.bus_sig(sig)
-					self._interm_busy_time -= 1  # account for current cycle
-					self.state = ('Busy', self._interm_busy_time)
+						self.pending_busy_time += cache.bus_sig(sig)
+					self.pending_busy_time -= 1  # account for current cycle
+					self.state = ('Busy', self.pending_busy_time)
+					self.pending_busy_time = 0
 
 				# otherwise, hand over to next cache in queue
 				elif len(self._cache_requests_queue) > 0:
 					c = self._cache_requests_queue.pop(0)
-					self._interm_busy_time = 0
-					t = c.pr_sig_bus_ready() + self._interm_busy_time
+					t = c.pr_sig_bus_ready() + self.pending_busy_time
 					# current cycle is already accounted for in pr_sig_bus_ready()
 					self.state = ('Busy', t)
 	
@@ -553,7 +579,8 @@ def simulate(instructions):
 	return c
 
 if __name__=='__main__':
-	print(simulate([
+
+	TEST_1 = ([
 		[
 			('PrRead', 0),
 			('Other', 3),
@@ -568,4 +595,15 @@ if __name__=='__main__':
 			('Other', 2),
 			('PrWrite', 0),
 		]
-	]))
+	], 251)
+
+	TEST_2_PAYLOAD = [ 
+		[ 
+			('PrWrite', 0), 
+			('PrWrite', 512), 
+			('PrWrite', 1024), 
+		] 
+	]
+
+
+	print(simulate(TEST_2_PAYLOAD))
