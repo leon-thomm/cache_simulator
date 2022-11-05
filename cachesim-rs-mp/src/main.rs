@@ -4,6 +4,36 @@ use std::sync::mpsc;
     A MESI and Dragon cache coherence protocol simulator.
  */
 
+// system specs
+
+struct SystemSpec {
+    protocol: String,
+    word_size: i32,
+    address_size: i32,
+    mem_lat: i32,
+    cache_hit_lat: i32,
+    bus_word_tf_lat: i32,
+    block_size: i32,
+    cache_size: i32,
+    cache_assoc: i32,
+}
+
+impl SystemSpec {
+    fn new() -> Self {
+        SystemSpec {
+            protocol: "MESI".into(),
+            word_size: 4,       // bytes
+            address_size: 4,    // bytes
+            mem_lat: 100,       // cpu cycles
+            cache_hit_lat: 1,   // cpu cycles
+            bus_word_tf_lat: 2, // cpu cycles
+            block_size: 32,     // bytes
+            cache_size: 4096,   // bytes
+            cache_assoc: 2,     // blocks
+        }
+    }
+}
+
 // addresses
 
 #[derive(Clone)]
