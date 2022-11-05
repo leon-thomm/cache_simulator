@@ -46,30 +46,29 @@ class Processor:
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
-	def tick(self, cycles=1):
-		# processor is ticked first
-
-		# cycles invariant: if state is not WaitingForCache, then cycles == 1
-
+	def prepare_tick(self):
 		# update state
 
 		match self.state:
-			case ('WaitingForCache',):
-				return
-			case ('Done',):
-				return
+			# 'WaitingForCache' and 'Done' don't have any effect
+
 			case ('ReadyToProceed',):
 				self.state = ('Ready',)
 			case ('ExecutingOther', n):
 				if n == 0:
 					self.state = ('Ready',)
-				else:
-					self.state = ('ExecutingOther', n-cycles)
-		
-		# proceed
+
+		if self.state[0] == 'Ready' and len(self.instructions) == 0:
+			self.state = ('Done',)
+	
+	def tick(self, cycles=1):
+		# processor is ticked first
 
 		match self.state:
+			case ('ExecutingOther', n):
+				self.state = ('ExecutingOther', n-cycles)
 			case ('Ready',):
+				# cycles == 1
 				if len(self.instructions) > 0:
 					inst = self.instructions.pop(0)
 					# execute next instruction
@@ -90,6 +89,9 @@ class Processor:
 								self.tick()
 				else:
 					self.state = ('Done',)
+			case ('WaitingForCache',) | ('Done',):
+				# do nothing
+				pass
 	
 	def proceed(self):
 		self.state = ('ReadyToProceed',)
@@ -132,7 +134,7 @@ class Cache:
 		set = self.data[index]
 		if state == 'I':
 			# remove block
-			set.remove((tag, state))
+			set.remove((tag, self.state_of(addr)))
 		else:
 			for i, (tag_, state_) in enumerate(set):
 				if tag_ == tag:
@@ -190,19 +192,18 @@ class Cache:
 		
 		set.append((tag, state))
 		return t
-
+	
+	def prepare_tick(self):
+		match self.state:
+			case ('ResolvingRequest', 0):
+				self.proc.proceed()
+				self.state = ('Idle',)
+	
 	def tick(self, cycles=1):
 		# cache is ticked second, after processor
-
-		# cycles invariant: if state is not ResolvingRequest, then cycles == 1
-
 		match self.state:
 			case ('ResolvingRequest', t):
-				if t-cycles == 0:
-					self.proc.proceed()
-					self.state = ('Idle',)
-				else:
-					self.state = ('ResolvingRequest', t-cycles)
+				self.state = ('ResolvingRequest', t-cycles)
 	
 	def pr_sig(self, event, addr):
 
@@ -492,25 +493,23 @@ class Bus:
 	def get_caches(self, exclude=None):
 		return [cache for cache in self.caches if cache != exclude]
 	
+	def prepare_tick(self):
+		match self.state:
+			case ('Busy', 0):
+				self.state = ('Idle',)
+		
+
 	def tick(self, cycles):
 		# the bus is ticked last, after processor and after cache
 
-		# update state
-
-		match self.state:
-			case ('Busy', t):
-				# notice t here, not t-1; because the bus is ticked last 
-				# and another cache can only acquire the bus in the cycle 
-				# *after* the previes owner freed it
-				if t == 0:
-					self.state = ('Idle',)
-				else:
-					self.state = ('Busy', t-cycles)
-		
 		# proceed
 
 		match self.state:
+			case ('Busy', t):
+				self.state = ('Busy', t-cycles)
+			
 			case ('Idle',):
+				# cycles == 1
 
 				# check if there is pending busy time
 				if self.pending_busy_time > 0:
@@ -549,38 +548,49 @@ def simulate(instructions):
 	bus = Bus(caches)
 	for c in caches:
 		c.bus = bus
-	
-	def bus_is_busy():
-		return bus.state[0] == 'Busy' and bus.state[1] > 0
 
-	c = 0
+	cycle_count = 0
 	while(not all([proc.state == ('Done',) for proc in procs])):
 
-		# optimize
-		# min_wait = min([
-		# 	p.state[1] if p.state[0] == 'ExecutingOther' else (
-		# 	c.state[1] if c.state[0] == 'ResolvingRequest' else (
-		# 	MAXINT if c.state[0] == 'WaitingForBus' else (
-		# 	0
-		# 	)))
-		# 	for (p, c) in zip(procs, caches)
-		# ])
-		# t = 1 if min_wait == 0 else min_wait
 		t = 1
 
-		for proc in procs:
-			proc.tick(t)
-		for cache in caches:
-			cache.tick(t)
+		# optimize
+		t = min([
+			p.state[1] if p.state[0] == 'ExecutingOther' else (
+			c.state[1] if c.state[0] == 'ResolvingRequest' else (
+			bus.state[1] if bus.state[0] == 'Busy' else 1
+			))
+			for (p, c) in zip(procs, caches)
+		])
+
+		# tick components
+		for p in procs:
+			p.tick(t)
+		for c in caches:
+			c.tick(t)
 		bus.tick(t)
-		c += t
-	c -= 1  # last cycle was only last processor jumping from ReadToProceed to Done
+
+		cycle_count += t
+
+		# prepare components for next cycle; clean state
+		bus.prepare_tick()
+		for c in caches:
+			c.prepare_tick()
+		for p in procs:
+			p.prepare_tick()
+
+
+	# bus might still be busy
+	if bus.state[0] == 'Busy':
+		cycle_count += bus.state[1]
+
+	# cycle_count -= 1  # last cycle was only last processor jumping from ReadToProceed to Done
 	
-	return c
+	return cycle_count
 
 if __name__=='__main__':
 
-	TEST_1 = ([
+	TEST_1_PAYLOAD = [
 		[
 			('PrRead', 0),
 			('Other', 3),
@@ -595,7 +605,7 @@ if __name__=='__main__':
 			('Other', 2),
 			('PrWrite', 0),
 		]
-	], 251)
+	] # expected: 251
 
 	TEST_2_PAYLOAD = [ 
 		[ 
@@ -606,4 +616,4 @@ if __name__=='__main__':
 	]
 
 
-	print(simulate(TEST_2_PAYLOAD))
+	print(simulate(TEST_1_PAYLOAD))
