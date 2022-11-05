@@ -189,12 +189,12 @@ impl Bus {
         todo!()
     }
 }
-}
 
+// simulator
 
-fn simulate(insts: Vec<Vec<Instruction>>) {
+fn simulate(insts: Vec<Vec<Instr>>) {
 
-    let n = insts.len();
+    let n = insts.len() as i32;
 
     // each component (processors, caches, bus) communicates to others by sending messages
     // to the simulator (main thread) via channels which will forward messages to the
@@ -204,15 +204,15 @@ fn simulate(insts: Vec<Vec<Instruction>>) {
 
     let (tx, rx) = mpsc::channel();
 
-    let procs = (0..n).map(|i| {
-        Processor::new(i, tx.clone(), insts[i].clone())
+    let mut procs = (0..n).map(|i| {
+        Processor::new(i, insts[i as usize].clone(), tx.clone())
     }).collect::<Vec<_>>();
 
-    let caches = (0..n).map(|i| {
+    let mut caches = (0..n).map(|i| {
         Cache::new(i, tx.clone())
     }).collect::<Vec<_>>();
 
-    let bus = Bus::new(tx.clone());
+    let mut bus = Bus::new(n, tx.clone());
 
     // simulate
     let mut cycle_count = 0;
@@ -224,25 +224,33 @@ fn simulate(insts: Vec<Vec<Instruction>>) {
         }
         tx.send(Msg::TickBus).unwrap();
 
+        for i in 0..n as usize {
+            procs[i].tick();
+            caches[i].tick();
+        }
+        bus.tick();
+
+        let mut msg_received = false;
         while let Ok(msg) = rx.try_recv() {
+            msg_received = true;
             match msg {
                 Msg::ProcToCache(i, msg) => {
-                    caches[i].handle_msg(msg);
+                    caches[i as usize].handle_msg(msg);
                 },
                 Msg::CacheToProc(i, msg) => {
-                    procs[i].handle_msg(msg);
+                    procs[i as usize].handle_msg(msg);
                 },
                 Msg::CacheToBus(i, msg) => {
                     bus.handle_msg(i, msg);
                 },
                 Msg::BusToCache(i, msg) => {
-                    caches[i].handle_msg(msg);
+                    caches[i as usize].handle_msg(msg);
                 },
                 Msg::TickProc(i) => {
-                    procs[i].tick();
+                    procs[i as usize].tick();
                 },
                 Msg::TickCache(i) => {
-                    caches[i].tick();
+                    caches[i as usize].tick();
                 },
                 Msg::TickBus => {
                     bus.tick();
@@ -251,20 +259,17 @@ fn simulate(insts: Vec<Vec<Instruction>>) {
         }
         cycle_count += 1;
 
-        // if all procs done, break
-        if procs.iter().all(|p| p.done()) {
-            break;
-        }
+        if !msg_received { break; }
     }
     println!("cycles: {}", cycle_count);
 }
 
 
 fn main() {
-    let (tx, rx) = mpsc::channel();
+    // let (tx, rx) = mpsc::channel();
 
-    tx.send(MessageType::Msg("Hello".to_string())).unwrap();
-    tx.send(MessageType::Msg("World".to_string())).unwrap();
+    // tx.send(MessageType::Msg("Hello".to_string())).unwrap();
+    // tx.send(MessageType::Msg("World".to_string())).unwrap();
 
     // loop {
     //     match rx.recv() {
