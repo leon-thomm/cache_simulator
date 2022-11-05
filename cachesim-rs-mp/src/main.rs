@@ -87,6 +87,17 @@ enum BusSignal {
     BusRdX(Addr),
 }
 
+// instructions
+
+#[derive(Clone)]
+enum Instr {
+    Read(Addr),
+    Write(Addr),
+    Other(i32),
+}
+
+type Instructions = Vec<Instr>;
+
 }
 
 // optional callback receiver for the bus
