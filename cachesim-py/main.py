@@ -75,7 +75,7 @@ class Processor:
 				if n == 0:
 					self.state = ('Ready',)
 
-		if self.state[0] == 'Ready' and len(self.instructions) == 0:
+		if self.state[0] == 'Ready' and self.instruction_index >= len(self.instructions):
 			self.state = ('Done',)
 	
 	def tick(self, cycles=1):
