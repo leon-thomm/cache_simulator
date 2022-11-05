@@ -1,8 +1,10 @@
 # A MESI and Dragon Cache Simulator
 
 from os import access
+from glob import glob
 from pickle import PROTO
 from xmlrpc.client import MAXINT
+from typing import List, Tuple
 
 
 PROTOCOL = 'MESI'
@@ -46,6 +48,18 @@ class Processor:
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
+	def translate_instr(self, instr):
+		if type(instr[0]) == int:
+			match instr[0]:
+				case 0:
+					return ('PrRead', instr[1])
+				case 1:
+					return ('PrWrite', instr[1])
+				case 2:
+					return ('Other', instr[1])
+		else:
+			return instr
+	
 	def prepare(self):
 		# update state
 
@@ -70,7 +84,7 @@ class Processor:
 			case ('Ready',):
 				# cycles == 1
 				if len(self.instructions) > 0:
-					inst = self.instructions.pop(0)
+					inst = self.translate_instr(self.instructions.pop(0))
 					# execute next instruction
 					match inst:
 						# make sure to call cache *after* updating state, because cache might update proc state
@@ -588,6 +602,17 @@ def simulate(instructions):
 	
 	return cycle_count
 
+def read_test_files(testname) -> List[Tuple[int, int]]:
+	insts = []
+	for fname in reversed(glob(testname+'*.data')):
+		with open(fname, 'r') as f:
+			insts.append([
+				(int(s.split(' ')[0], 10), int(s.split(' ')[1], 16))
+				for s in f.readlines()
+			])
+		
+	return insts
+
 if __name__=='__main__':
 
 	TEST_1_PAYLOAD = [
@@ -616,4 +641,4 @@ if __name__=='__main__':
 	]	# expected: 104
 
 
-	print(simulate(TEST_2_PAYLOAD))
+	print(simulate(read_test_files('test')))
