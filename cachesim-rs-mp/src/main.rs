@@ -161,6 +161,34 @@ impl Cache {
     }
 }
 
+// bus
+
+enum BusState {
+    Idle,
+    Busy(i32, i32),
+}
+
+struct Bus {
+    state: BusState,
+    tx: mpsc::Sender<Msg>,
+    n: i32,
+}
+
+impl Bus {
+    fn new(n: i32, tx: mpsc::Sender<Msg>) -> Self {
+        Bus {
+            state: BusState::Idle,
+            tx,
+            n
+        }
+    }
+    fn tick(&mut self) {
+        todo!()
+    }
+    fn handle_msg(&mut self, cache_id: i32, msg: BusMsg) {
+        todo!()
+    }
+}
 }
 
 
