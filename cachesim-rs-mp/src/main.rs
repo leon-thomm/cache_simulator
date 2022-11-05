@@ -98,6 +98,38 @@ enum Instr {
 
 type Instructions = Vec<Instr>;
 
+// processors
+
+enum ProcState {
+    Idle,
+    ExecutingOther(i32),
+    WaitingForCache,
+    Done,
+}
+
+struct Processor {
+    id: i32,
+    state: ProcState,
+    instructions: Instructions,
+    tx: mpsc::Sender<Msg>,
+}
+
+impl Processor {
+    fn new(id: i32, instructions: Instructions, tx: mpsc::Sender<Msg>) -> Self {
+        Processor {
+            id,
+            state: ProcState::Idle,
+            instructions,
+            tx,
+        }
+    }
+    fn tick(&mut self) {
+        todo!()
+    }
+    fn handle_msg(&mut self, msg: ProcMsg) {
+        todo!()
+    }
+}
 }
 
 // optional callback receiver for the bus
