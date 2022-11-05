@@ -192,7 +192,8 @@ impl Bus {
 
 // simulator
 
-fn simulate(insts: Vec<Vec<Instr>>) {
+fn simulate(insts: Vec<Instructions>) {
+
 
     let n = insts.len() as i32;
 
@@ -234,27 +235,13 @@ fn simulate(insts: Vec<Vec<Instr>>) {
         while let Ok(msg) = rx.try_recv() {
             msg_received = true;
             match msg {
-                Msg::ProcToCache(i, msg) => {
-                    caches[i as usize].handle_msg(msg);
-                },
-                Msg::CacheToProc(i, msg) => {
-                    procs[i as usize].handle_msg(msg);
-                },
-                Msg::CacheToBus(i, msg) => {
-                    bus.handle_msg(i, msg);
-                },
-                Msg::BusToCache(i, msg) => {
-                    caches[i as usize].handle_msg(msg);
-                },
-                Msg::TickProc(i) => {
-                    procs[i as usize].tick();
-                },
-                Msg::TickCache(i) => {
-                    caches[i as usize].tick();
-                },
-                Msg::TickBus => {
-                    bus.tick();
-                },
+                Msg::ProcToCache(i, msg) => caches[i as usize].handle_msg(msg),
+                Msg::CacheToProc(i, msg) => procs[i as usize].handle_msg(msg),
+                Msg::CacheToBus(i, msg) => bus.handle_msg(i, msg),
+                Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
+                Msg::TickProc(i) => procs[i as usize].tick(),
+                Msg::TickCache(i) => caches[i as usize].tick(),
+                Msg::TickBus => bus.tick(),
             }
         }
         cycle_count += 1;
