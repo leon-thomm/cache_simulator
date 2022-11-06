@@ -21,7 +21,7 @@ impl<MsgType> Eq for DelayedMsg<MsgType> {}
 
 impl<MsgType> Ord for DelayedMsg<MsgType> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.t.cmp(&other.t)
+        other.t.cmp(&self.t)
     }
 }
 
