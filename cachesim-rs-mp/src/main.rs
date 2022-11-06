@@ -124,20 +124,22 @@ enum ProcState {
     Done,
 }
 
-struct Processor {
+struct Processor<'a> {
     id: i32,
     state: ProcState,
     instructions: Instructions,
     tx: mpsc::Sender<Msg>,
+    specs: &'a SystemSpec,
 }
 
-impl Processor {
-    fn new(id: i32, instructions: Instructions, tx: mpsc::Sender<Msg>) -> Self {
+impl<'a> Processor<'a> {
+    fn new(id: i32, instructions: Instructions, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
         Processor {
             id,
             state: ProcState::Idle,
             instructions,
             tx,
+            specs,
         }
     }
     fn tick(&mut self) {
@@ -156,18 +158,20 @@ enum CacheState {
     WaitingForBus,
 }
 
-struct Cache {
+struct Cache<'a> {
     id: i32,
     state: CacheState,
     tx: mpsc::Sender<Msg>,
+    specs: &'a SystemSpec,
 }
 
-impl Cache {
-    fn new(id: i32, tx: mpsc::Sender<Msg>) -> Self {
+impl<'a> Cache<'a> {
+    fn new(id: i32, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
         Cache {
             id,
             state: CacheState::Idle,
             tx,
+            specs,
         }
     }
     fn tick(&mut self) {
@@ -185,18 +189,20 @@ enum BusState {
     Busy(i32, i32),
 }
 
-struct Bus {
+struct Bus<'a> {
     state: BusState,
     tx: mpsc::Sender<Msg>,
     n: i32,
+    specs: &'a SystemSpec,
 }
 
-impl Bus {
-    fn new(n: i32, tx: mpsc::Sender<Msg>) -> Self {
+impl<'a> Bus<'a> {
+    fn new(n: i32, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
         Bus {
             state: BusState::Idle,
             tx,
-            n
+            n,
+            specs,
         }
     }
     fn tick(&mut self) {
@@ -209,7 +215,7 @@ impl Bus {
 
 // simulator
 
-fn simulate(insts: Vec<Instructions>) {
+fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
 
     let n = insts.len() as i32;
@@ -223,14 +229,14 @@ fn simulate(insts: Vec<Instructions>) {
     let (tx, rx) = mpsc::channel();
 
     let mut procs = (0..n).map(|i| {
-        Processor::new(i, insts[i as usize].clone(), tx.clone())
+        Processor::new(i, insts[i as usize].clone(), tx.clone(), &specs)
     }).collect::<Vec<_>>();
 
     let mut caches = (0..n).map(|i| {
-        Cache::new(i, tx.clone())
+        Cache::new(i, tx.clone(), &specs)
     }).collect::<Vec<_>>();
 
-    let mut bus = Bus::new(n, tx.clone());
+    let mut bus = Bus::new(n, tx.clone(), &specs);
 
     // simulate
     let mut cycle_count = 0;
