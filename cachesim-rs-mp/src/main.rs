@@ -1,5 +1,8 @@
+extern crate core;
+
 mod delayed_q;
 
+use std::collections::VecDeque;
 use crate::delayed_q::*;
 
 type DelQMsgSender = DelQSender<Msg>;
@@ -78,8 +81,10 @@ impl Addr {
 enum Msg {
     ProcToCache(i32, CacheMsg),
     CacheToProc(i32, ProcMsg),
+    CacheToCache(i32, CacheMsg),
     CacheToBus(i32, BusMsg),
     BusToCache(i32, CacheMsg),
+    BusToBus(i32, BusMsg),
 
     // TickProc(i32),
     // TickCache(i32),
@@ -91,20 +96,23 @@ enum ProcMsg {
     ReadyToProceedNext,
 }
 
+#[derive(Clone)]
 enum CacheMsg {
     // Tick,
     Read(Addr),
     Write(Addr),
-    BusSignal(BusSignal),
-    BusDone,
+    BusSignal(BusSignal),           // incoming bus signal
+    BusLocked,                      // bus is locked by the cache
 }
 
 enum BusMsg {
     // StayBusy(i32, i32),
-    SendSignal(i32, BusSignal),
-    ReadyToProceedNext,
+    Acquire(i32),                   // locks the bus synchronously
+    QueueSignal(i32, BusSignal),    // queues a signal, which will lock the bus asynchronously
+    ReadyToFreeNext,                // frees the bus at the end of the cycle
 }
 
+#[derive(Clone)]
 enum BusSignal {
     BusRd(Addr),
     BusRdX(Addr),
@@ -123,7 +131,7 @@ type Instructions = Vec<Instr>;
 
 // processors
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ProcState {
     Ready,
     ExecutingOther(i32),
@@ -160,31 +168,25 @@ impl<'a> Processor<'a> {
         }).unwrap();
     }
     fn tick(&mut self) {
-        match self.state {
+        self.state = match self.state {
             ProcState::Ready => {
                 match self.instructions.pop().unwrap() {
                     Instr::Read(addr) => {
-                        self.state = ProcState::WaitingForCache;
                         self.send_cache(CacheMsg::Read(addr), 0);
+                        ProcState::WaitingForCache
                     }
                     Instr::Write(addr) => {
-                        self.state = ProcState::WaitingForCache;
                         self.send_cache(CacheMsg::Write(addr), 0);
+                        ProcState::WaitingForCache
                     }
                     Instr::Other(time) => {
-                        match time {
-                            0 => {self.state = ProcState::Ready; self.tick()},
-                            _ => self.state = ProcState::ExecutingOther(time),
-                        }
+                        ProcState::ExecutingOther(time - 1)
                     }
                 }
             }
-            ProcState::ExecutingOther(time) => {
-                self.state = ProcState::ExecutingOther(time - 1);
-            }
-            ProcState::WaitingForCache | ProcState::Done => {
-                // do nothing
-            }
+            ProcState::ExecutingOther(time) => ProcState::ExecutingOther(time - 1),
+            ProcState::WaitingForCache => ProcState::WaitingForCache,
+            ProcState::Done => ProcState::Done,
             _ => panic!("Processor in invalid state"),
         }
     }
@@ -195,11 +197,11 @@ impl<'a> Processor<'a> {
         }
     }
     fn post_tick(&mut self) {
-        match self.state {
-            ProcState::ProceedNext =>
-                self.state = ProcState::Ready,
-            _ => {}
-        }
+        self.state = match self.state {
+            ProcState::ExecutingOther(0) => ProcState::Ready,
+            ProcState::ProceedNext => ProcState::Ready,
+            _ => self.state.clone(),
+        };
         if self.state == ProcState::Ready && self.instructions.len() == 0 {
             self.state = ProcState::Done;
         }
@@ -244,39 +246,108 @@ impl<'a> Cache<'a> {
 
 // bus
 
+#[derive(Clone)]
 enum BusState {
-    Idle,
-    Busy(i32),
-
-    ProceedNext,
+    Free,
+    Locked(i32),
+    FreeNext,
 }
 
 struct Bus<'a> {
+    bus_id: i32,
     state: BusState,
     tx: DelQMsgSender,
     n: i32,
     specs: &'a SystemSpec,
     cache_ids: Vec<i32>,
+    signal_queue: VecDeque<(BusSignal, Option<i32>)>,   // signals have higher priority than explicit locks by caches
+    lock_queue: VecDeque<i32>,                          // explicit locks by caches
 }
 
 impl<'a> Bus<'a> {
-    fn new(n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
+    fn new(bus_id: i32, n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Bus {
-            state: BusState::Idle,
+            bus_id,
+            state: BusState::Free,
             tx,
             n,
             specs,
-            cache_ids
+            cache_ids,
+            signal_queue: VecDeque::new(),
+            lock_queue: VecDeque::new(),
         }
     }
-    fn tick(&mut self) {
-        todo!()
+    fn send_cache(&self, cache_id: i32, msg: CacheMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::BusToCache(cache_id, msg),
+        }).unwrap();
     }
-    fn handle_msg(&mut self, cache_id: i32, msg: BusMsg) {
-        todo!()
+    fn send_caches(&self, msg: CacheMsg, delay: i32, except: Option<i32>) {
+        for cache_id in &self.cache_ids {
+            if except.is_some() && except.unwrap() == *cache_id { continue; }
+            self.send_cache(*cache_id, msg.clone(), delay);
+        }
+    }
+    fn send_self(&self, msg: BusMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::BusToBus(self.bus_id, msg),
+        }).unwrap();
+    }
+    fn send_sig(&self, cache_id: i32, sig: BusSignal) {
+        self.send_caches(
+            CacheMsg::BusSignal(sig),
+            self.specs.t_cache_to_cache_msg(),
+            Some(cache_id));
+    }
+    fn tick(&mut self) {
+        // match self.state {
+        //     BusState::Free => {
+        //         if let Some((sig, proc_id)) = self.signal_queue.pop_front() {
+        //             // the signal is old, send it immediately
+        //             self.state = BusState::Locked(proc_id.unwrap());
+        //             self.send_sig(self.cache_ids[0], sig);
+        //         }
+        //     },
+        //     _ => {}
+        // }
+    }
+    fn handle_msg(&mut self, msg: BusMsg) {
+        // match self.state {
+        //     BusState::Free =>
+        //         match msg {
+        //             BusMsg::Acquire(cache_id) => {
+        //                 self.state = BusState::Locked(cache_id);
+        //                 self.send_cache(cache_id, CacheMsg::BusLocked, 0);
+        //             },
+        //             BusMsg::QueueSignal(cache_id, sig) => {
+        //                 // start sending immediately
+        //                 self.state = BusState::Locked(cache_id);
+        //                 self.send_self(
+        //                     BusMsg::SendSignal(cache_id, sig),
+        //                     self.specs.t_cache_to_cache_msg() - 1);
+        //             },
+        //             _ => panic!("Bus received unexpected message"),
+        //         },
+        //     BusState::Locked(cache_id) =>
+        //         match msg {
+        //             BusMsg::SendSignal(cache_id, sig) => {
+        //                 self.send_sig(cache_id, sig)
+        //             },
+        //             BusMsg::ReadyToFreeNext => {
+        //                 self.state = BusState::FreeNext;
+        //             },
+        //         },
+        //     BusState::FreeNext =>
+        //         todo!()
+        // }
     }
     fn post_tick(&mut self) {
-        todo!()
+        self.state = match self.state {
+            BusState::FreeNext => BusState::Free,
+            _ => self.state.clone(),
+        };
     }
 }
 
@@ -314,6 +385,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
     }).collect::<Vec<_>>();
 
     let mut bus = Bus::new(
+        2*n,
         n,
         (n..2*n).collect::<Vec<_>>(),
         tx.clone(),
@@ -334,8 +406,10 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
             match msg {
                 Msg::ProcToCache(i, msg) => caches[i as usize].handle_msg(msg),
                 Msg::CacheToProc(i, msg) => procs[i as usize].handle_msg(msg),
-                Msg::CacheToBus(i, msg) => bus.handle_msg(i, msg),
+                Msg::CacheToCache(i, msg) => caches[i as usize].handle_msg(msg),
+                Msg::CacheToBus(i, msg) => bus.handle_msg(msg),
                 Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
+                Msg::BusToBus(i, msg) => bus.handle_msg(msg),
             }
             if !dq.msg_available() { dq.update_q() }
         }
@@ -350,16 +424,36 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
 
 fn main() {
-    // let (tx, rx) = mpsc::channel();
+    // test delayed queue
 
-    // tx.send(MessageType::Msg("Hello".to_string())).unwrap();
-    // tx.send(MessageType::Msg("World".to_string())).unwrap();
+    let (mut dq, tx) = DelayedQ::<i32>::new();
 
-    // loop {
-    //     match rx.recv() {
-    //         Ok(MessageType::Msg(msg)) => println!("{}", msg),
-    //         Ok(MessageType::Quit) => break,
-    //         Err(_) => break,
-    //     }
-    // }
+    tx.send(DelayedMsg {
+        t: 0,
+        msg: 42,
+    }).unwrap();
+
+    tx.send(DelayedMsg {
+        t: 1,
+        msg: 43,
+    }).unwrap();
+
+    dq.update_q();
+    let mut c = 0;
+    let mut x = false;
+    while dq.msg_available() {
+        println!("messages after {} cycles:", c);
+        while let Some(msg) = dq.try_fetch() {
+            println!("msg: {}", msg);
+            if !x {
+                tx.send(DelayedMsg { t: 0, msg: 100 }).unwrap();
+                dq.update_q();
+                x = true;
+                println!("appended another message in cycle {}", c);
+            }
+        }
+        c += 1;
+        dq.update_time(c);
+    }
+    println!("done, cycles: {}", c);
 }

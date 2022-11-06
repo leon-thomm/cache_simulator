@@ -1,5 +1,9 @@
 // implements a message queue with discrete message delays, based on std::sync::mpsc
 
+// TODO: I have an order requirement! Messages with the same time stamp must be
+//  processed in the order they were received. This is not guaranteed by the
+//  current implementation.
+
 use std::cmp::Ordering;
 use std::sync::mpsc;
 
