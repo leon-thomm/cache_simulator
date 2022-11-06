@@ -77,18 +77,18 @@ enum Msg {
     CacheToBus(i32, BusMsg),
     BusToCache(i32, CacheMsg),
 
-    TickProc(i32),
-    TickCache(i32),
-    TickBus,
+    // TickProc(i32),
+    // TickCache(i32),
+    // TickBus,
 }
 
 enum ProcMsg {
-    Tick,
+    // Tick,
     RequestResolved,
 }
 
 enum CacheMsg {
-    Tick,
+    // Tick,
     Read(i32),
     Write(i32),
     BusSignal(BusSignal),
@@ -258,7 +258,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
     let mut bus = Bus::new(
         n,
         (n..2*n).collect::<Vec<_>>(),
-        tx.clone(), 
+        tx.clone(),
         &specs);
 
     // simulate
@@ -279,9 +279,9 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
                 Msg::CacheToProc(i, msg) => procs[i as usize].handle_msg(msg),
                 Msg::CacheToBus(i, msg) => bus.handle_msg(i, msg),
                 Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
-                Msg::TickProc(i) => procs[i as usize].tick(),
-                Msg::TickCache(i) => caches[i as usize].tick(),
-                Msg::TickBus => bus.tick(),
+                // Msg::TickProc(i) => procs[i as usize].tick(),
+                // Msg::TickCache(i) => caches[i as usize].tick(),
+                // Msg::TickBus => bus.tick(),
             }
         }
         cycle_count += 1;
