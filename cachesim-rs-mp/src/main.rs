@@ -119,6 +119,7 @@ type Instructions = Vec<Instr>;
 
 // processors
 
+#[derive(PartialEq)]
 enum ProcState {
     Ready,
     ExecutingOther(i32),
@@ -262,31 +263,13 @@ impl<'a> Bus<'a> {
         }
     }
     fn tick(&mut self) {
-        match self.state {
-            BusState::Idle => {
-                // do nothing
-            }
-            BusState::Busy(time, cache_id) => {
-                if time == 0 {
-                    self.state = BusState::Idle;
-                    self.tx.send(Msg::BusToCache(cache_id, ...)).unwrap();
-                } else {
-                    self.state = BusState::Busy(time - 1, cache_id);
-                }
-            }
-        }
+        todo!()
     }
     fn handle_msg(&mut self, cache_id: i32, msg: BusMsg) {
         todo!()
     }
     fn post_tick(&mut self) {
-        match self.state {
-            BusState::Busy(0, cache_id) => {
-                self.state = BusState::Idle;
-                self.tx.send(Msg::BusToCache(cache_id, CacheMsg::BusDone)).unwrap();
-            }
-            _ => {}
-        }
+        todo!()
     }
 }
 
