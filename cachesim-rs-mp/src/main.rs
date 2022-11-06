@@ -118,7 +118,7 @@ type Instructions = Vec<Instr>;
 // processors
 
 enum ProcState {
-    Idle,
+    Ready,
     ExecutingOther(i32),
     WaitingForCache,
     ReadyToProceed,
@@ -138,18 +138,58 @@ impl<'a> Processor<'a> {
     fn new(id: i32, cache_id: i32, instructions: Instructions, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
         Processor {
             id,
-            state: ProcState::Idle,
+            state: ProcState::Ready,
             instructions,
             tx,
             specs,
             cache_id,
         }
     }
+    fn send_cache(&self, msg: CacheMsg) {
+        self.tx.send(Msg::ProcToCache(self.cache_id, msg)).unwrap();
+    }
     fn tick(&mut self) {
-        todo!()
+        match self.state {
+            ProcState::Ready => {
+                match self.instructions.pop().unwrap() {
+                    Instr::Read(addr) => {
+                        self.state = ProcState::WaitingForCache;
+                        self.send_cache(CacheMsg::Read(addr));
+                    }
+                    Instr::Write(addr) => {
+                        self.state = ProcState::WaitingForCache;
+                        self.send_cache(CacheMsg::Write(addr));
+                    }
+                    Instr::Other(time) => {
+                        match time {
+                            0 => {self.state = ProcState::Ready; self.tick()},
+                            _ => self.state = ProcState::ExecutingOther(time),
+                        }
+                    }
+                }
+            }
+            ProcState::ExecutingOther(time) => {
+                self.state = ProcState::ExecutingOther(time - 1);
+            }
+            ProcState::WaitingForCache | ProcState::Done => {
+                // do nothing
+            }
+            _ => panic!("Processor in invalid state"),
+        }
     }
     fn handle_msg(&mut self, msg: ProcMsg) {
-        todo!()
+        match msg {
+            ProcMsg::RequestResolved =>
+                self.state = ProcState::ReadyToProceed
+                // proceeds in next cycle
+        }
+    }
+    fn post_tick(&mut self) {
+        match self.state {
+            ProcState::ReadyToProceed =>
+                self.state = ProcState::Ready,
+            _ => {}
+        }
     }
 }
 
