@@ -46,20 +46,18 @@ type TimedMsg<MsgType> = DelayedMsg<MsgType>;
 
 pub struct DelayedQ<MsgType> {
     q: std::collections::BinaryHeap<TimedMsg<MsgType>>,
-    pub tx: mpsc::Sender<DelayedMsg<MsgType>>,
     rx: mpsc::Receiver<DelayedMsg<MsgType>>,
     time: i32,
 }
 
 impl<MsgType> DelayedQ<MsgType> {
-    pub fn new() -> Self {
+    pub fn new() -> (Self, DelQSender<MsgType>) {
         let (tx, rx) = mpsc::channel();
-        DelayedQ {
+        (DelayedQ {
             q: std::collections::BinaryHeap::new(),
-            tx,
             rx,
             time: 0,
-        }
+        }, tx)
     }
     pub fn update_time(&mut self, new_time: i32) {
         self.time = new_time;

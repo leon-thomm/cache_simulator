@@ -293,14 +293,14 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
     // implement everything single-threaded for now
 
-    let mut dq = DelayedQ::<Msg>::new();
+    let (mut dq, tx) = DelayedQ::<Msg>::new();
 
     let mut procs = (0..n).map(|i| {
         Processor::new(
             i,
             i+n,
             insts[i as usize].clone(),
-            dq.tx.clone(),
+            tx.clone(),
             &specs)
     }).collect::<Vec<_>>();
 
@@ -309,14 +309,14 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
             i+n,
             i,
             2*n,
-            dq.tx.clone(),
+            tx.clone(),
             &specs)
     }).collect::<Vec<_>>();
 
     let mut bus = Bus::new(
         n,
         (n..2*n).collect::<Vec<_>>(),
-        dq.tx.clone(),
+        tx.clone(),
         &specs);
 
     // simulate
