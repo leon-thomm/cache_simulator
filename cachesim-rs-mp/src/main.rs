@@ -32,6 +32,23 @@ impl SystemSpec {
             cache_assoc: 2,     // blocks
         }
     }
+    // timing
+    fn t_cache_to_cache_msg(&self) -> i32 {
+        // assuming immediate response through wired OR
+        self.bus_word_tf_lat * self.address_size / self.word_size
+    }
+    fn t_cache_to_cache_transfer(&self) -> i32 {
+        self.bus_word_tf_lat * self.block_size / self.word_size
+    }
+    fn t_flush(&self) -> i32 {
+        self.mem_lat
+    }
+    fn t_mem_fetch(&self) -> i32 {
+        self.mem_lat
+    }
+    fn t_cache_hit(&self) -> i32 {
+        self.cache_hit_lat
+    }
 }
 
 // addresses
@@ -44,7 +61,7 @@ impl Addr {
         Addr(addr)
     }
     fn pos(&self, specs: &SystemSpec) -> (i32, i32) {
-        // returns the index and tag and index of the address under given system specs
+        // returns the index and of the address under given system specs
         let num_indices = specs.cache_size / (specs.block_size * specs.cache_assoc);
         let index = self.0 % num_indices;
         let tag = self.0 / num_indices;
@@ -219,12 +236,6 @@ fn simulate(insts: Vec<Instructions>) {
     let mut cycle_count = 0;
     loop {
         // tick everyone -- THE ORDER SHOULD NOT MATTER!!
-        for i in 0..n {
-            tx.send(Msg::TickProc(i)).unwrap();
-            tx.send(Msg::TickCache(i)).unwrap();
-        }
-        tx.send(Msg::TickBus).unwrap();
-
         for i in 0..n as usize {
             procs[i].tick();
             caches[i].tick();
