@@ -89,8 +89,8 @@ enum ProcMsg {
 
 enum CacheMsg {
     // Tick,
-    Read(i32),
-    Write(i32),
+    Read(Addr),
+    Write(Addr),
     BusSignal(BusSignal),
 }
 
