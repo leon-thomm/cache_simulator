@@ -612,7 +612,7 @@ def simulate(instructions):
 
 def read_test_files(testname) -> List[Tuple[int, int]]:
 	insts = []
-	for fname in reversed(glob(testname+'*.data')):
+	for fname in sorted(glob(testname+'*.data')):
 		with open(fname, 'r') as f:
 			insts.append([
 				(int(s.split(' ')[0], 10), int(s.split(' ')[1], 16))
