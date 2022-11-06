@@ -84,7 +84,7 @@ enum Msg {
 
 enum ProcMsg {
     // Tick,
-    RequestResolved,
+    ReadyToProceedNext,
 }
 
 enum CacheMsg {
@@ -96,8 +96,9 @@ enum CacheMsg {
 }
 
 enum BusMsg {
-    StayBusy(i32, i32),
+    // StayBusy(i32, i32),
     SendSignal(i32, BusSignal),
+    ReadyToProceedNext,
 }
 
 enum BusSignal {
@@ -122,8 +123,9 @@ enum ProcState {
     Ready,
     ExecutingOther(i32),
     WaitingForCache,
-    ReadyToProceed,
     Done,
+
+    ProceedNext,
 }
 
 struct Processor<'a> {
@@ -180,16 +182,18 @@ impl<'a> Processor<'a> {
     }
     fn handle_msg(&mut self, msg: ProcMsg) {
         match msg {
-            ProcMsg::RequestResolved =>
-                self.state = ProcState::ReadyToProceed
-                // proceeds in next cycle
+            ProcMsg::ReadyToProceedNext =>
+                self.state = ProcState::ProceedNext
         }
     }
     fn post_tick(&mut self) {
         match self.state {
-            ProcState::ReadyToProceed =>
+            ProcState::ProceedNext =>
                 self.state = ProcState::Ready,
             _ => {}
+        }
+        if self.state == ProcState::Ready && self.instructions.len() == 0 {
+            self.state = ProcState::Done;
         }
     }
 }
@@ -234,7 +238,9 @@ impl<'a> Cache<'a> {
 
 enum BusState {
     Idle,
-    Busy(i32, i32),
+    Busy(i32),
+
+    ProceedNext,
 }
 
 struct Bus<'a> {
