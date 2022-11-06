@@ -6,18 +6,9 @@ use std::sync::mpsc;
 // delayed message type
 
 #[derive(Clone)]
-struct DelayedMsg<MsgType> {
-    t: i32,
-    msg: MsgType,
-}
-
-impl<MsgType> DelayedMsg<MsgType> {
-    fn new(msg: MsgType, delay: i32) -> Self {
-        DelayedMsg { msg, t: delay }
-    }
-    fn decrement(&mut self) {
-        self.t -= 1;
-    }
+pub struct DelayedMsg<MsgType> {
+    pub t: i32,
+    pub msg: MsgType,
 }
 
 impl<MsgType> PartialEq for DelayedMsg<MsgType> {
@@ -40,6 +31,8 @@ impl<MsgType> PartialOrd<Self> for DelayedMsg<MsgType> {
     }
 }
 
+pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
+
 // timed message type
 
 type TimedMsg<MsgType> = DelayedMsg<MsgType>;
@@ -53,7 +46,7 @@ type TimedMsg<MsgType> = DelayedMsg<MsgType>;
 
 pub struct DelayedQ<MsgType> {
     q: std::collections::BinaryHeap<TimedMsg<MsgType>>,
-    tx: mpsc::Sender<DelayedMsg<MsgType>>,
+    pub tx: mpsc::Sender<DelayedMsg<MsgType>>,
     rx: mpsc::Receiver<DelayedMsg<MsgType>>,
     time: i32,
 }
@@ -68,13 +61,13 @@ impl<MsgType> DelayedQ<MsgType> {
             time: 0,
         }
     }
-    pub fn update_time(&mut self, dt: i32) {
-        self.time += dt;
+    pub fn update_time(&mut self, new_time: i32) {
+        self.time = new_time;
     }
     pub fn update_q(&mut self) {
         while let Ok(DelayedMsg{ t: d, msg: m}) = self.rx.try_recv() {
             // transform delay into timestamp
-            self.q.push(TimedMsg::new(m, self.time + d));
+            self.q.push(TimedMsg{ t: self.time + d, msg: m });
         }
     }
     pub fn msg_available(&self) -> bool {
@@ -95,33 +88,3 @@ impl<MsgType> DelayedQ<MsgType> {
         None
     }
 }
-
-//
-// #[derive(Clone)]
-// struct DQSender<T> {
-//     sender: mpsc::Sender<T>,
-// }
-//
-// struct DelayedQ<T> {
-//     tx: mpsc::Sender<(T, i32)>,
-//     rx: mpsc::Receiver<(T, i32)>,
-// }
-//
-// impl<T> DelayedQ<T> {
-//     fn new() -> Self {
-//         let (tx, rx) = mpsc::channel();
-//         DelayedQ { tx, rx }
-//     }
-//     fn send(&self, msg: T, delay: i32) {
-//         self.tx.send((msg, delay)).unwrap();
-//     }
-//     fn recv(&self) -> Option<T> {
-//         let (msg, delay) = self.rx.recv().unwrap();
-//         if delay > 0 {
-//             self.send(msg, delay - 1);
-//             None
-//         } else {
-//             Some(msg)
-//         }
-//     }
-// }

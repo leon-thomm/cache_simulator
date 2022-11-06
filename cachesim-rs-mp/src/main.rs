@@ -1,6 +1,8 @@
 mod delayed_q;
 
-use std::sync::mpsc;
+use crate::delayed_q::*;
+
+type DelQMsgSender = DelQSender<Msg>;
 
 /*
     A MESI and Dragon cache coherence protocol simulator.
@@ -135,13 +137,13 @@ struct Processor<'a> {
     id: i32,
     state: ProcState,
     instructions: Instructions,
-    tx: mpsc::Sender<Msg>,
+    tx: DelQMsgSender,
     specs: &'a SystemSpec,
     cache_id: i32,
 }
 
 impl<'a> Processor<'a> {
-    fn new(id: i32, cache_id: i32, instructions: Instructions, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
+    fn new(id: i32, cache_id: i32, instructions: Instructions, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Processor {
             id,
             state: ProcState::Ready,
@@ -151,8 +153,11 @@ impl<'a> Processor<'a> {
             cache_id,
         }
     }
-    fn send_cache(&self, msg: CacheMsg) {
-        self.tx.send(Msg::ProcToCache(self.cache_id, msg)).unwrap();
+    fn send_cache(&self, msg: CacheMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::ProcToCache(self.cache_id, msg),
+        }).unwrap();
     }
     fn tick(&mut self) {
         match self.state {
@@ -160,11 +165,11 @@ impl<'a> Processor<'a> {
                 match self.instructions.pop().unwrap() {
                     Instr::Read(addr) => {
                         self.state = ProcState::WaitingForCache;
-                        self.send_cache(CacheMsg::Read(addr));
+                        self.send_cache(CacheMsg::Read(addr), 0);
                     }
                     Instr::Write(addr) => {
                         self.state = ProcState::WaitingForCache;
-                        self.send_cache(CacheMsg::Write(addr));
+                        self.send_cache(CacheMsg::Write(addr), 0);
                     }
                     Instr::Other(time) => {
                         match time {
@@ -212,14 +217,14 @@ enum CacheState {
 struct Cache<'a> {
     id: i32,
     state: CacheState,
-    tx: mpsc::Sender<Msg>,
+    tx: DelQMsgSender,
     specs: &'a SystemSpec,
     proc_id: i32,
     bus_id: i32,
 }
 
 impl<'a> Cache<'a> {
-    fn new(id: i32, proc_id: i32, bus_id: i32, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
+    fn new(id: i32, proc_id: i32, bus_id: i32, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Cache {
             id,
             state: CacheState::Idle,
@@ -248,14 +253,14 @@ enum BusState {
 
 struct Bus<'a> {
     state: BusState,
-    tx: mpsc::Sender<Msg>,
+    tx: DelQMsgSender,
     n: i32,
     specs: &'a SystemSpec,
     cache_ids: Vec<i32>,
 }
 
 impl<'a> Bus<'a> {
-    fn new(n: i32, cache_ids: Vec<i32>, tx: mpsc::Sender<Msg>, specs: &'a SystemSpec) -> Self {
+    fn new(n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Bus {
             state: BusState::Idle,
             tx,
@@ -288,14 +293,14 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
     // implement everything single-threaded for now
 
-    let (tx, rx) = mpsc::channel();
+    let mut dq = DelayedQ::<Msg>::new();
 
     let mut procs = (0..n).map(|i| {
         Processor::new(
             i,
             i+n,
             insts[i as usize].clone(),
-            tx.clone(),
+            dq.tx.clone(),
             &specs)
     }).collect::<Vec<_>>();
 
@@ -304,14 +309,14 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
             i+n,
             i,
             2*n,
-            tx.clone(),
+            dq.tx.clone(),
             &specs)
     }).collect::<Vec<_>>();
 
     let mut bus = Bus::new(
         n,
         (n..2*n).collect::<Vec<_>>(),
-        tx.clone(),
+        dq.tx.clone(),
         &specs);
 
     // simulate
@@ -324,22 +329,21 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
         }
         bus.tick();
 
-        let mut msg_received = false;
-        while let Ok(msg) = rx.try_recv() {
-            msg_received = true;
+        // handle messages
+        while let Some(msg) = dq.try_fetch() {
             match msg {
                 Msg::ProcToCache(i, msg) => caches[i as usize].handle_msg(msg),
                 Msg::CacheToProc(i, msg) => procs[i as usize].handle_msg(msg),
                 Msg::CacheToBus(i, msg) => bus.handle_msg(i, msg),
                 Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
-                // Msg::TickProc(i) => procs[i as usize].tick(),
-                // Msg::TickCache(i) => caches[i as usize].tick(),
-                // Msg::TickBus => bus.tick(),
             }
+            if !dq.msg_available() { dq.update_q() }
         }
-        cycle_count += 1;
 
-        if !msg_received { break; }
+        cycle_count += 1;
+        dq.update_time(cycle_count);
+
+        if procs.iter().all(|p| p.state == ProcState::Done) { break; }
     }
     println!("cycles: {}", cycle_count);
 }
