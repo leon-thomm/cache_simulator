@@ -1,9 +1,5 @@
 // implements a message queue with discrete message delays, based on std::sync::mpsc
 
-// TODO: I have an order requirement! Messages with the same time stamp must be
-//  processed in the order they were received. This is not guaranteed by the
-//  current implementation.
-
 use std::cmp::Ordering;
 use std::sync::mpsc;
 
@@ -15,21 +11,39 @@ pub struct DelayedMsg<MsgType> {
     pub msg: MsgType,
 }
 
-impl<MsgType> PartialEq for DelayedMsg<MsgType> {
+// timed message type
+
+/*
+    to avoid having to mutate every element in the queue, which would either require
+    unsafe code or rebuilding the whole heap, the queue does not decrease a delay,
+    but instead increases its timestamp. to have a separate type for the separate
+    meaning, the queue uses TimedMsg where t denotes the timestamp at which the
+    message should be sent and the ordering for the items having the same timestamp,
+    whereas in DelayedMsg t denotes the remaining delay.
+ */
+
+struct TimedMsg<MsgType> {
+    t: i32,
+    ord: i32,
+    msg: MsgType,
+}
+
+impl<MsgType> Eq for TimedMsg<MsgType> {}
+
+impl<MsgType> PartialEq for TimedMsg<MsgType> {
     fn eq(&self, other: &Self) -> bool {
-        self.t == other.t
+        (self.t, self.ord) == (other.t, other.ord)
     }
 }
 
-impl<MsgType> Eq for DelayedMsg<MsgType> {}
-
-impl<MsgType> Ord for DelayedMsg<MsgType> {
+impl<MsgType> Ord for TimedMsg<MsgType> {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.t.cmp(&self.t)
+        // lexicographically
+        (other.t, other.ord).cmp(&(self.t, self.ord))
     }
 }
 
-impl<MsgType> PartialOrd<Self> for DelayedMsg<MsgType> {
+impl<MsgType> PartialOrd for TimedMsg<MsgType> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -37,21 +51,13 @@ impl<MsgType> PartialOrd<Self> for DelayedMsg<MsgType> {
 
 pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
 
-// timed message type
-
-type TimedMsg<MsgType> = DelayedMsg<MsgType>;
-// to avoid having to mutate every element in the queue, which would either require
-// unsafe code or rebuilding the whole heap, the queue does not decrease a delay,
-// but instead increases its timestamp. to have a separate type for the separate
-// meaning, the queue uses TimedMsg where t denotes the timestamp at which the
-// message should be sent, whereas in DelayedMsg t denotes the remaining delay.
-
 // delayed message queue
 
 pub struct DelayedQ<MsgType> {
     q: std::collections::BinaryHeap<TimedMsg<MsgType>>,
     rx: mpsc::Receiver<DelayedMsg<MsgType>>,
     time: i32,
+    ord_ctr: i32,
 }
 
 impl<MsgType> DelayedQ<MsgType> {
@@ -61,6 +67,7 @@ impl<MsgType> DelayedQ<MsgType> {
             q: std::collections::BinaryHeap::new(),
             rx,
             time: 0,
+            ord_ctr: 0
         }, tx)
     }
     pub fn update_time(&mut self, new_time: i32) {
@@ -69,7 +76,8 @@ impl<MsgType> DelayedQ<MsgType> {
     pub fn update_q(&mut self) {
         while let Ok(DelayedMsg{ t: d, msg: m}) = self.rx.try_recv() {
             // transform delay into timestamp
-            self.q.push(TimedMsg{ t: self.time + d, msg: m });
+            self.q.push(TimedMsg{ t: self.time + d, msg: m, ord: self.ord_ctr });
+            self.ord_ctr += 1;
         }
     }
     pub fn msg_available(&self) -> bool {

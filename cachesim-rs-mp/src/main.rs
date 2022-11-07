@@ -434,8 +434,13 @@ fn main() {
     }).unwrap();
 
     tx.send(DelayedMsg {
-        t: 1,
+        t: 0,
         msg: 43,
+    }).unwrap();
+
+    tx.send(DelayedMsg {
+        t: 1,
+        msg: 44,
     }).unwrap();
 
     dq.update_q();
