@@ -5,6 +5,7 @@ from glob import glob
 from pickle import PROTO
 from xmlrpc.client import MAXINT
 from typing import List, Tuple
+from collections import deque
 
 
 PROTOCOL = 'MESI'
@@ -41,10 +42,12 @@ class Times:
 
 
 class Processor:
-	def __init__(self, instructions):
+	def __init__(self, instructions, pid):
 		super().__init__()
 
+		self.pid = pid
 		self.instructions = instructions
+		self.instruction_index = 0
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
@@ -72,7 +75,7 @@ class Processor:
 				if n == 0:
 					self.state = ('Ready',)
 
-		if self.state[0] == 'Ready' and len(self.instructions) == 0:
+		if self.state[0] == 'Ready' and self.instruction_index >= len(self.instructions):
 			self.state = ('Done',)
 	
 	def tick(self, cycles=1):
@@ -82,9 +85,13 @@ class Processor:
 			case ('ExecutingOther', n):
 				self.state = ('ExecutingOther', n-cycles)
 			case ('Ready',):
+				# debugging output
+				# if (self.instruction_index % 10000 == 0):
+				# 	print("processor: %d, instruction_index: %d" % (self.pid, self.instruction_index))
+    
 				# cycles == 1
-				if len(self.instructions) > 0:
-					inst = self.translate_instr(self.instructions.pop(0))
+				if self.instruction_index < len(self.instructions):
+					inst = self.translate_instr(self.instructions[self.instruction_index])
 					# execute next instruction
 					match inst:
 						# make sure to call cache *after* updating state, because cache might update proc state
@@ -101,6 +108,7 @@ class Processor:
 								# allow for 0 time instructions
 								self.state = ('Ready',)
 								self.tick()
+					self.instruction_index += 1
 				else:
 					self.state = ('Done',)
 			case ('WaitingForCache',) | ('Done',):
@@ -501,8 +509,8 @@ class Bus:
 		self.caches = caches
 		self.state = ('Idle',)
 		self.pending_busy_time = 0
-		self._cache_requests_queue = []
-		self._signals_queue = []
+		self._cache_requests_queue = deque()
+		self._signals_queue = deque()
 	
 	def get_caches(self, exclude=None):
 		return [cache for cache in self.caches if cache != exclude]
@@ -533,7 +541,7 @@ class Bus:
 
 				# check if there are any bus signals to send
 				elif len(self._signals_queue) > 0:
-					origin_cache, sig = self._signals_queue.pop(0)
+					origin_cache, sig = self._signals_queue.popleft()
 					self.pending_busy_time = Times.ask_other_caches()
 					for cache in self.get_caches(exclude=origin_cache):
 						self.pending_busy_time += cache.bus_sig(sig)
@@ -543,7 +551,7 @@ class Bus:
 
 				# otherwise, hand over to next cache in queue
 				elif len(self._cache_requests_queue) > 0:
-					c = self._cache_requests_queue.pop(0)
+					c = self._cache_requests_queue.popleft()
 					t = c.pr_sig_bus_ready() + self.pending_busy_time
 					# current cycle is already accounted for in pr_sig_bus_ready()
 					self.state = ('Busy', t)
@@ -557,7 +565,7 @@ class Bus:
 
 def simulate(instructions):
 	n = len(instructions)
-	procs = [Processor(instructions[i]) for i in range(n)]
+	procs = [Processor(instructions[i], i) for i in range(n)]
 	caches = [procs[i].cache for i in range(n)]
 	bus = Bus(caches)
 	for c in caches:
@@ -604,7 +612,7 @@ def simulate(instructions):
 
 def read_test_files(testname) -> List[Tuple[int, int]]:
 	insts = []
-	for fname in reversed(glob(testname+'*.data')):
+	for fname in sorted(glob(testname+'*.data')):
 		with open(fname, 'r') as f:
 			insts.append([
 				(int(s.split(' ')[0], 10), int(s.split(' ')[1], 16))
@@ -641,4 +649,4 @@ if __name__=='__main__':
 	]	# expected: 104
 
 
-	print(simulate(read_test_files('test')))
+	print(simulate(read_test_files("../tests/blackscholes")))
