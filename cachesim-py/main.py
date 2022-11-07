@@ -408,14 +408,14 @@ class Cache:
 						case 'PrWrite':
 							if others_have_block:
 								t += \
-									Times.ask_other_caches_time() + \
+									Times.ask_other_caches() + \
 									Times.cache_to_cache_transf()
 								bus_send_tx(('BusRd', addr))
 								bus_send_tx(('BusUpd', addr))
 								transition('Sm')
 							else:
 								t += \
-									Times.ask_other_caches_time() + \
+									Times.ask_other_caches() + \
 									Times.mem_fetch()
 								bus_send_tx(('BusRdX', addr))
 								transition('M')
@@ -427,11 +427,11 @@ class Cache:
 							error()
 						case 'PrWrite':
 							if others_have_block:
-								t += Times.ask_other_caches_time()
+								t += Times.ask_other_caches()
 								bus_send_tx(('BusUpd', addr))
 								transition('Sm')
 							else:
-								t += Times.ask_other_caches_time()
+								t += Times.ask_other_caches()
 								bus_send_tx(('BusUpd', addr))
 								transition('M')
 				case 'Sm':
@@ -440,10 +440,10 @@ class Cache:
 							error()
 						case 'PrWrite':
 							if others_have_block:
-								t += Times.ask_other_caches_time()
+								t += Times.ask_other_caches()
 								bus_send_tx(('BusUpd', addr))
 							else:
-								t += Times.ask_other_caches_time()
+								t += Times.ask_other_caches()
 								bus_send_tx(('BusUpd', addr))
 								transition('M')
 				case 'M':
