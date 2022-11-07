@@ -8,7 +8,70 @@ use crate::delayed_q::*;
 type DelQMsgSender = DelQSender<Msg>;
 
 /*
-    A MESI and Dragon cache coherence protocol simulator.
+    A Simulator for MESI (Illinois) and Dragon 4-state update-based cache coherence protocols.
+
+Assumptions:
+You have to make the following assumptions.
+
+1. Memory address is 32-bit.
+2. Each memory reference accesses 32-bit (4-bytes) of data. That is word size is 4-bytes.
+3. We only model the data cache.
+4. Each processor has its own L1 data cache.
+5. L1 data cache uses write-back, write-allocate policy and LRU replacement policy.
+6. L1 data caches are kept coherent using one of the implemented cache coherence protocols.
+7. Initially, all the caches are empty.
+8. The bus uses first come first serve arbitration policy when multiple processor
+   attempt bus transactions simultaneously. Ties are broken arbitrarily.
+9. The L1 data caches are backed up by main memory --- there is no L2 data cache.
+10. L1 cache hit is 1 cycle. Fetching a block from memory to cache takes additional 100
+    cycles. Sending a word from one cache to another (e.g., BusUpdate) takes only 2 cycles.
+    However, sending a cache block with N words (each word is 4 bytes) to another cache
+    takes 2N cycle. Assume that evicting a dirty cache block to memory when it gets replaced
+    is 100 cycles.
+11. There may be additional assumptions.
+
+Also assume that the caches are blocking. That is, if there is a cache miss, the cache
+cannot process further requests from the core and the core is completely halted (does not
+process any instructions). However, the snooping transactions from the bus still need to
+be processed in the cache.
+In each cycle, each core can execute at most one memory reference. As per our
+assumptions, you do not need to model L1 instruction cache. So the instruction address
+trace is not included. But the core cycle counter still has to be incremented with the cycle
+value for other instructions in between two load-store instructions.
+
+The program should take an input file name and cache configurations as arguments.
+The command line should be
+
+`coherence <protocol> <input_file> <cache_size> <associativity> <block_size>`
+
+where coherence is the executable file name and input parameters are
+- <protocol>: either MESI or Dragon
+- <input_file>: input benchmark name (e.g., bodytrack)
+- <cache_size>: cache size in bytes
+- <associativity>: associativity of the cache
+- <block_size>: block size in bytes
+
+Assume default parameters as 32-bit word size, 32-byte block size, and 4KB 2-way
+set associative cache per processor.
+
+Your program should generate the following output:
+- Overall Execution Cycle (different core will complete at different cycles;
+  report the maximum value across all cores) for the entire trace as well as
+  execution cycle per core
+- Number of compute cycles per core. These are the total number of cycles
+  spent processing other instructions between load/store instructions
+- Number of load/store instructions per core
+- Number of idle cycles (these are cycles where the core is waiting for the
+  request to the cache to be completed) per core
+- Data cache miss rate for each core
+- Amount of Data traffic in bytes on the bus (this is due to bus read, bus read
+  exclusive, bus write-back, and bus update transactions). Only include the
+  traffic for data and not for address. Thus invalidation requests do not
+  contribute to the data traffic.
+- Number of invalidations or updates on the bus
+- Distribution of accesses to private data versus shared data (for example,
+  access to modified state is private, while access to shared state is shared data)
+
  */
 
 // system specs
