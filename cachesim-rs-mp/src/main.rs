@@ -1,5 +1,3 @@
-extern crate core;
-
 mod delayed_q;
 
 use std::collections::VecDeque;
@@ -11,7 +9,6 @@ type DelQMsgSender = DelQSender<Msg>;
     A Simulator for MESI (Illinois) and Dragon 4-state update-based cache coherence protocols.
 
 Assumptions:
-You have to make the following assumptions.
 
 1. Memory address is 32-bit.
 2. Each memory reference accesses 32-bit (4-bytes) of data. That is word size is 4-bytes.
@@ -170,9 +167,12 @@ enum CacheMsg {
 
 enum BusMsg {
     // StayBusy(i32, i32),
-    Acquire(i32),                   // locks the bus synchronously
-    QueueSignal(i32, BusSignal),    // queues a signal, which will lock the bus asynchronously
+    Acquire(i32),                   // locks the bus (synchronously)
+    QueueSignal(i32, BusSignal),    // queues a signal, which will lock the bus (asynchronously)
+    GoBusy,                         // for simplicity, sent by the caches
+    GoIdle,                         // for simplicity, sent by the caches
     ReadyToFreeNext,                // frees the bus at the end of the cycle
+    // FetchQueues,
 }
 
 #[derive(Clone)]
@@ -311,8 +311,15 @@ impl<'a> Cache<'a> {
 
 #[derive(Clone)]
 enum BusState {
-    Free,
-    Locked(i32),
+    // possible states when the bus is not currently owned by a single cache
+    Unlocked_Idle,
+    Unlocked_Busy,
+
+    // possible states when the bus is currently owned by a single cache
+    Locked_Idle(i32),
+    Locked_Busy(i32),
+
+    // other
     FreeNext,
 }
 
@@ -331,7 +338,7 @@ impl<'a> Bus<'a> {
     fn new(bus_id: i32, n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Bus {
             bus_id,
-            state: BusState::Free,
+            state: BusState::Free(BusFreeState::Idle),
             tx,
             n,
             specs,
@@ -358,25 +365,74 @@ impl<'a> Bus<'a> {
             msg: Msg::BusToBus(self.bus_id, msg),
         }).unwrap();
     }
-    fn send_sig(&self, cache_id: i32, sig: BusSignal) {
-        self.send_caches(
-            CacheMsg::BusSignal(sig),
-            self.specs.t_cache_to_cache_msg(),
-            Some(cache_id));
+    fn fetch_queues(&mut self) -> BusState {
+        // first check if there are pending bus signals to send
+        if let Some((sig, cache_id)) = self.signal_queue.pop_front() {
+            let t = self.specs.t_cache_to_cache_msg();
+            self.send_caches(
+                CacheMsg::BusSignal(sig.clone()),
+                t,
+                cache_id);
+            self.send_self(
+                BusMsg::SignalSent(cache_id, sig.clone()),
+                t);
+            BusState::Unlocked_Busy
+        }
+        // otherwise, free to be locked by a cache
+        else if let Some(cache_id) = self.lock_queue.pop_front() {
+            self.send_cache(cache_id, BusLocked, 0);
+            BusState::Locked_Idle(cache_id)
+        } else {
+            BusState::Unlocked_Idle
+        }
     }
     fn tick(&mut self) {
-        // match self.state {
-        //     BusState::Free => {
-        //         if let Some((sig, proc_id)) = self.signal_queue.pop_front() {
-        //             // the signal is old, send it immediately
-        //             self.state = BusState::Locked(proc_id.unwrap());
-        //             self.send_sig(self.cache_ids[0], sig);
-        //         }
-        //     },
-        //     _ => {}
-        // }
+        match &self.state {
+            BusState::Unlocked_Idle => self.state = self.fetch_queues(),
+            _ => {}
+        }
     }
     fn handle_msg(&mut self, msg: BusMsg) {
+        self.state = match (self.state, msg) {
+
+            // busy and idle
+            (BusState::Unlocked_Idle, BusMsg::GoBusy) => BusState::Unlocked_Busy,
+            (BusState::Unlocked_Busy, BusMsg::GoIdle) => BusState::Unlocked_Idle,
+            (BusState::Locked_Idle(_), BusMsg::GoBusy) => BusState::Locked_Busy,
+            (BusState::Locked_Busy(_), BusMsg::GoIdle) => BusState::Locked_Idle,
+
+            // acquiring lock
+            (_, BusMsg::Acquire(cache_id)) => {
+                self.lock_queue.push_back(cache_id);
+                match self.state {
+                    BusState::Unlocked_Idle => self.fetch_queues(),
+                    _ => self.state.clone(),
+                }
+            },
+
+            // releasing lock
+            (BusState::Locked_Idle(id), BusMsg::ReadyToFreeNext) => {
+                BusState::FreeNext
+            }
+
+            // sending signals
+            (BusState::Unlocked_Idle, BusMsg::QueueSignal(cache_id, sig)) => {
+                self.signal_queue.push_back((sig, Some(cache_id)));
+                self.fetch_queues()
+            },
+            (BusState::Unlocked_Busy, BusMsg::QueueSignal(cache_id, sig)) => {
+                self.signal_queue.push_back((sig, Some(cache_id)));
+                BusState::Unlocked_Busy
+            },
+            (BusState::Locked_Idle(owner_id), BusMsg::QueueSignal(cache_id, sig)) => {
+                self.signal_queue.push_back((sig, Some(cache_id)));
+                // send signal immediately if it came from owner
+                if cache_id == owner_id { self.fetch_queues() }
+                else { BusState::Locked_Idle(owner_id) }
+            },
+
+            _ => panic!("Invalid bus state"),
+        }
         // match self.state {
         //     BusState::Free =>
         //         match msg {

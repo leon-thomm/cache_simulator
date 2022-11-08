@@ -11,14 +11,16 @@ pub struct DelayedMsg<MsgType> {
     pub msg: MsgType,
 }
 
+pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
+
 // timed message type
 
 /*
     to avoid having to mutate every element in the queue, which would either require
     unsafe code or rebuilding the whole heap, the queue does not decrease a delay,
-    but instead increases its timestamp. to have a separate type for the separate
-    meaning, the queue uses TimedMsg where t denotes the timestamp at which the
-    message should be sent and the ordering for the items having the same timestamp,
+    but instead increases its timestamp. the queue uses TimedMsg where t denotes the
+    timestamp at which the message should be sent (and the monotonically increased
+    ord defines the order of different time messages within one timestamp),
     whereas in DelayedMsg t denotes the remaining delay.
  */
 
@@ -48,8 +50,6 @@ impl<MsgType> PartialOrd for TimedMsg<MsgType> {
         Some(self.cmp(other))
     }
 }
-
-pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
 
 // delayed message queue
 
