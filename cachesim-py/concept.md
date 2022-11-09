@@ -24,8 +24,6 @@
 - if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
 - the memory is word-addressible not, byte-addressible
 - memory is generally only updated on eviction/flushing
-- the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI_protocol). I am assuming the state transitions on wikipedia
-- also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it
 - the caches do not flush their dirty lines at the end of the simulation - the system is assumed to run indefinitely
 
 (*): as stated in the task description
