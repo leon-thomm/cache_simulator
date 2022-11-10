@@ -48,6 +48,13 @@ class Processor:
 		self.pid = pid
 		self.instructions = instructions
 		self.instruction_index = 0
+		
+		self.cycle_count = 0
+		self.compute_cycle_count = 0
+		self.load_instruction_count = 0
+		self.store_instruction_count = 0
+		self.idle_cycles = 0
+		
 		self.cache = Cache(self)
 		self.state = ('Ready',)
 	
@@ -80,6 +87,7 @@ class Processor:
 	
 	def tick(self, cycles=1):
 		# processor is ticked first
+		self.cycle_count += cycles
 
 		match self.state:
 			case ('ExecutingOther', n):
@@ -96,12 +104,15 @@ class Processor:
 					match inst:
 						# make sure to call cache *after* updating state, because cache might update proc state
 						case ('PrRead', addr):
+							self.load_instruction_count += 1
 							self.state = ('WaitingForCache',)
 							self.cache.pr_sig('PrRead', addr)
 						case ('PrWrite', addr):
+							self.store_instruction_count += 1
 							self.state = ('WaitingForCache',)
 							self.cache.pr_sig('PrWrite', addr)
 						case ('Other', time):
+							self.compute_cycle_count += time
 							if time > 0:
 								self.state = ('ExecutingOther', time-1)
 							else:
@@ -112,6 +123,7 @@ class Processor:
 				else:
 					self.state = ('Done',)
 			case ('WaitingForCache',) | ('Done',):
+				self.idle_cycles += cycles
 				# do nothing
 				pass
 	
@@ -131,6 +143,15 @@ class Cache:
 			for idx in range((CACHE_SIZE//WORD_SIZE) // CACHE_ASSOC)
 		}
 		self.state = ('Idle',)
+  
+		self.cache_misses = 0
+		self.cache_hits = 0
+
+		self.private_data_accesses = 0
+		self.shared_data_accesses = 0
+
+		# invalidations for MESI, updates for Dragon
+		self.num_invalidations_or_updates = 0
 	
 	def dcache_pos(self, addr):
 		"""returns the index and tag of the cache block containing the address"""
@@ -271,11 +292,19 @@ class Cache:
 					idle()
 				case t:
 					res_req(t)
+     	
+      # list of other caches which have the block cached
+		others = [
+			c
+			for c in self.bus.get_caches(exclude=self)
+			if c.state_of(addr) != 'I'
+		]
 
 		# state machine
 		if PROTOCOL == 'MESI':
 			match s:
 				case 'I':
+					self.cache_misses += 1
 					match event:
 						case 'PrRead':
 							acquire_bus()
@@ -289,14 +318,19 @@ class Cache:
 								proc_proceed()
 								idle()
 				case 'S':
+					self.cache_hits += 1
+					self.shared_data_accesses += 1
 					match event:
 						case 'PrRead':
 							hit_imm()
 						case 'PrWrite':
 							bus_send_tx(('BusRdX', addr))
+							self.num_invalidations_or_updates += len(others)
 							transition('M')
 							hit_imm()
 				case 'E':
+					self.cache_hits += 1
+					self.private_data_accesses += 1
 					match event:
 						case 'PrRead':
 							hit_imm()
@@ -304,13 +338,18 @@ class Cache:
 							transition('M')
 							hit_imm()
 				case 'M':
+					self.cache_hits += 1
+					self.private_data_accesses += 1
 					hit_imm()
 
 		elif PROTOCOL == 'Dragon':
 			match s:
 				case 'I':
+					self.cache_misses += 1
 					acquire_bus()
 				case 'E':
+					self.cache_hits += 1
+					self.private_data_accesses += 1
 					match event:
 						case 'PrRead':
 							hit_imm()
@@ -318,18 +357,26 @@ class Cache:
 							transition('M')
 							hit_imm()
 				case 'Sc':
+					self.cache_hits == 1
+					self.shared_data_accesses += 1
 					match event:
 						case 'PrRead':
 							hit_imm()
 						case 'PrWrite':
+							self.num_invalidations_or_updates += len(others)
 							acquire_bus()
 				case 'Sm':
+					self.cache_hits += 1
+					self.shared_data_accesses += 1
 					match event:
 						case 'PrRead':
 							hit_imm()
 						case 'PrWrite':
+							self.num_invalidations_or_updates += len(others)
 							acquire_bus()
 				case 'M':
+					self.cache_hits += 1
+					self.private_data_accesses += 1
 					hit_imm()
 
 
@@ -511,6 +558,8 @@ class Bus:
 		self.pending_busy_time = 0
 		self._cache_requests_queue = deque()
 		self._signals_queue = deque()
+
+		self.traffic_bytes = 0
 	
 	def get_caches(self, exclude=None):
 		return [cache for cache in self.caches if cache != exclude]
@@ -554,6 +603,7 @@ class Bus:
 					c = self._cache_requests_queue.popleft()
 					t = c.pr_sig_bus_ready() + self.pending_busy_time
 					# current cycle is already accounted for in pr_sig_bus_ready()
+					self.traffic_bytes += BLOCK_SIZE
 					self.state = ('Busy', t)
 	
 	def acquire(self, cache):
@@ -608,6 +658,29 @@ def simulate(instructions):
 
 	# cycle_count -= 1  # last cycle was only last processor jumping from ReadToProceed to Done
 	
+	print("overall execution cycles: %d" % cycle_count)
+	for proc in procs:
+		print("cycle count for p%d: %d" % (proc.pid, proc.cycle_count))
+	
+	for proc in procs:
+		print("compute cycles for p%d: %d" % (proc.pid, proc.compute_cycle_count))
+	
+	for proc in procs:
+		print("p%d number of loads: %d number of stores: %d" % (proc.pid, proc.load_instruction_count, proc.store_instruction_count))
+	
+	for proc in procs:
+		print("idle cycles for p%d: %d" % (proc.pid, proc.idle_cycles))
+	
+	for proc in procs:
+		print(proc.cache.cache_misses, proc.cache.cache_misses + proc.cache.cache_hits)
+		print("miss rate for p%d: %f" % (proc.pid, float(proc.cache.cache_misses) / float(proc.cache.cache_misses + proc.cache.cache_hits)))
+	
+	print("bus traffic: %d" % bus.traffic_bytes)
+	print("number of invalidations/updates: %d" % sum([proc.cache.num_invalidations_or_updates for proc in procs]))
+	
+	for proc in procs:
+		print("p%d access to private data: %d access to shared data: %d" % (proc.pid, proc.cache.private_data_accesses, proc.cache.shared_data_accesses))
+ 
 	return cycle_count
 
 def read_test_files(testname) -> List[Tuple[int, int]]:
