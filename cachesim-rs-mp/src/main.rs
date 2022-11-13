@@ -168,13 +168,14 @@ type Instructions = Vec<Instr>;
 
 // processors
 
+#[derive(Clone)]
 enum ProcMsg {
     Tick,
     PostTick,
     RequestResolved,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 enum ProcState {
     Idle,
     WaitingForCache,
@@ -272,6 +273,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
 
 // caches
 
+#[derive(Clone)]
 enum PrReq {
     Read(Addr),
     Write(Addr),
@@ -288,11 +290,12 @@ enum CacheMsg {
     PrReqResolved,
 }
 
+#[derive(Clone)]
 enum CacheState {
     Idle,
 
-    WaitingForBus_PrReq(ProcReq),
-    ResolvingPrReq(ProcReq),
+    WaitingForBus_PrReq(PrReq),
+    ResolvingPrReq(PrReq),
     PrReqResolved,
 
     WaitingForBus_BusSig(BusSignal),
@@ -320,6 +323,8 @@ impl<'a> Cache<'a> {
             specs,
             proc_id,
             bus_id,
+            bus_signals_queue: VecDeque::new(),
+            pr_sig_buffer: None,
         }
     }
     fn handle_pr_req(&mut self, req: ProcReq) {
@@ -351,7 +356,7 @@ impl<'a> Cache<'a> {
 
 impl MsgHandler<CacheMsg> for Cache<'_> {
     fn handle_msg(&mut self, msg: CacheMsg) {
-        match self.state {
+        match &self.state {
             CacheState::Idle => {
                 match msg {
                     CacheMsg::Tick => {
@@ -422,7 +427,7 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                     },
                     CacheMsg::BusLocked => {
                         self.state = CacheState::ResolvingBusReq(sig.clone());
-                        self.handle_bus_sig_bus_locked(sig);
+                        self.handle_bus_sig_bus_locked(sig.clone());
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -459,6 +464,7 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
 
 // bus
 
+#[derive(Clone)]
 enum BusMsg {
     Tick,
     PostTick,
