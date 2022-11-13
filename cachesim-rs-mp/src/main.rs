@@ -125,26 +125,11 @@ struct Addr(i32);
 
 impl Addr {
     fn pos(&self, specs: &SystemSpec) -> (i32, i32) {
-        // returns the index and of the address under given system specs
+        // returns the index and tag of the address under given system specs
         let num_indices = specs.cache_size / (specs.block_size * specs.cache_assoc);
         let index = self.0 % num_indices;
         let tag = self.0 / num_indices;
         (index, tag)
-    }
-}
-
-#[derive(Clone)]
-struct Block {
-    addr: Addr,
-    data: Vec<i32>,
-}
-
-impl Block {
-    fn new(addr: Addr, specs: &SystemSpec) -> Block {
-        Block {
-            addr,
-            data: vec![0; (specs.block_size / specs.word_size) as usize],
-        }
     }
 }
 
@@ -318,16 +303,29 @@ enum CacheState {
     BusReqResolved,
 }
 
-struct CacheSet {
-    blocks: Vec<Block>,
+struct CacheBlock {
+    tag: i32,
+    state: BlockState,
 }
 
-impl CacheSet {
-    fn new(specs: &SystemSpec) -> CacheSet {
+#[derive(Clone)]
+enum BlockState {
+    Invalid,
+    Shared,
+    Exclusive,
+    Modified,
+}
+
+struct CacheSet<'a> {
+    blocks: Vec<CacheBlock>,
+    specs: &'a SystemSpec,
+}
+
+impl<'a> CacheSet<'a> {
+    fn new(specs: &'a SystemSpec) -> CacheSet {
         CacheSet {
-            blocks: (0..specs.cache_assoc)
-                .map(|_| Block::new(Addr(-1), specs))
-                .collect(),
+            blocks: vec![],
+            specs,
         }
     }
 }
@@ -340,7 +338,7 @@ struct Cache<'a> {
     proc_id: i32,
     bus_signals_queue: VecDeque<BusSignal>,
     pr_sig_buffer: Option<PrReq>,
-    data: Vec<CacheSet>
+    data: Vec<CacheSet<'a>>
 }
 
 impl<'a> Cache<'a> {
@@ -358,9 +356,142 @@ impl<'a> Cache<'a> {
                 .collect(),
         }
     }
+    // data cache access
+    fn set_and_tag_of(&self, addr: &Addr) -> (&CacheSet, i32) {
+        let (index, tag) = addr.pos(self.specs);
+        (&self.data[index as usize], tag)
+    }
+    fn state_of(&self, addr: &Addr) -> BlockState {
+        let (set, tag) = self.set_and_tag_of(addr);
+        let block_state = set.blocks.iter()
+            .find(|block| block.tag == tag)
+            .map(|block| block.state.clone())
+            .unwrap_or(BlockState::Invalid);
+        block_state
+    }
+    fn access_causes_flush(&self, addr: &Addr) -> bool {
+        let (set, tag) = self.set_and_tag_of(addr);
+        let set_is_full = set.blocks.len() == self.specs.cache_assoc as usize;
+        match self.state_of(addr) {
+            BlockState::Invalid => set_is_full,
+            _ => false
+        }
+    }
+    fn access_uncached(&mut self, addr: &Addr) {
+        todo!()
+    }
+    fn access_cached(&mut self, addr: &Addr) {
+        todo!()
+    }
+    fn set_state_of(&mut self, addr: &Addr, state: BlockState) {
+        let (index, tag) = addr.pos(self.specs);
+        let set = &mut self.data[index as usize];
+
+        let block = set.blocks.iter_mut()
+            .find(|b| b.tag == tag)
+            .unwrap();
+        block.state = state;
+    }
+    // events and transitions
     fn handle_pr_req(&mut self, req: PrReq) {
         // invariant: self.state == CacheState::Idle
-        todo!()
+        let addr = match &req {
+            PrReq::Read(addr) => addr.clone(),
+            PrReq::Write(addr) => addr.clone(),
+        };
+
+        // shorthand helper functions
+
+        let req_ = req.clone();
+        let acquire_bus = |self_: &mut Self| {
+            self_.state = CacheState::WaitingForBus_PrReq(req_);
+            self_.send_bus(BusMsg::Acquire(self_.id), 0);
+        };
+
+        let send_bus_tx = |self_: &mut Self, signal: BusSignal| {
+            self_.send_bus(BusMsg::BusSig(self_.id, signal), 0);
+        };
+
+        let proc_proceed = |self_: &mut Self| {
+            self_.send_proc(ProcMsg::RequestResolved, 0);
+        };
+
+        let idle = |self_: &mut Self| {
+            self_.state = CacheState::Idle;
+        };
+
+        let transition = |self_: &mut Self, state: BlockState| {
+            self_.set_state_of(&addr, state);
+        };
+
+        // state machine
+        match self.state_of(&addr) {
+            BlockState::Invalid => {
+                match req {
+                    PrReq::Read(addr) => acquire_bus(self),
+                    PrReq::Write(addr) => {
+                        if self.access_causes_flush(&addr) {
+                            acquire_bus(self);
+                        } else {
+                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            self.access_uncached(&addr);
+                            proc_proceed(self);
+                            idle(self);
+                        }
+                    }
+                }
+            },
+            BlockState::Shared => {
+                match req {
+                    PrReq::Read(addr) => {
+                        // send_bus_tx(BusSignal::BusRd(addr));
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => {
+                        send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                        transition(self, BlockState::Modified);
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    }
+                }
+            },
+            BlockState::Exclusive => {
+                match req {
+                    PrReq::Read(addr) => {
+                        // send_bus_tx(BusSignal::BusRd(addr));
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => {
+                        // send_bus_tx(BusSignal::BusRdX(addr));
+                        transition(self, BlockState::Modified);
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    }
+                }
+            },
+            BlockState::Modified => {
+                match req {
+                    PrReq::Read(addr) => {
+                        // send_bus_tx(BusSignal::BusRd(addr));
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => {
+                        // send_bus_tx(BusSignal::BusRdX(addr));
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    }
+                }
+            },
+        }
     }
     fn handle_pr_req_bus_locked(&mut self, req: PrReq) {
         // invariant: self.state == CacheState::ResolvingPrReq
@@ -385,6 +516,7 @@ impl<'a> Cache<'a> {
         }
         // otherwise, do nothing
     }
+    // sending messages
     fn send_proc(&self, msg: ProcMsg, delay: i32) {
         self.tx.send(DelayedMsg {
             t: delay,
