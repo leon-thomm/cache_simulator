@@ -118,21 +118,33 @@ impl SystemSpec {
     }
 }
 
-// addresses
+// addresses and blocks
 
 #[derive(Clone)]
 struct Addr(i32);
 
 impl Addr {
-    fn new(addr: i32) -> Addr {
-        Addr(addr)
-    }
     fn pos(&self, specs: &SystemSpec) -> (i32, i32) {
         // returns the index and of the address under given system specs
         let num_indices = specs.cache_size / (specs.block_size * specs.cache_assoc);
         let index = self.0 % num_indices;
         let tag = self.0 / num_indices;
         (index, tag)
+    }
+}
+
+#[derive(Clone)]
+struct Block {
+    addr: Addr,
+    data: Vec<i32>,
+}
+
+impl Block {
+    fn new(addr: Addr, specs: &SystemSpec) -> Block {
+        Block {
+            addr,
+            data: vec![0; (specs.block_size / specs.word_size) as usize],
+        }
     }
 }
 
@@ -306,6 +318,20 @@ enum CacheState {
     BusReqResolved,
 }
 
+struct CacheSet {
+    blocks: Vec<Block>,
+}
+
+impl CacheSet {
+    fn new(specs: &SystemSpec) -> CacheSet {
+        CacheSet {
+            blocks: (0..specs.cache_assoc)
+                    .map(|_| Block::new(Addr(-1), specs))
+                    .collect(),
+        }
+    }
+}
+
 struct Cache<'a> {
     id: i32,
     state: CacheState,
@@ -314,6 +340,7 @@ struct Cache<'a> {
     proc_id: i32,
     bus_signals_queue: VecDeque<BusSignal>,
     pr_sig_buffer: Option<PrReq>,
+    data: Vec<CacheSet>
 }
 
 impl<'a> Cache<'a> {
@@ -326,6 +353,9 @@ impl<'a> Cache<'a> {
             proc_id,
             bus_signals_queue: VecDeque::new(),
             pr_sig_buffer: None,
+            data: (0..specs.cache_size/specs.cache_assoc)
+                    .map(|_| CacheSet::new(specs))
+                    .collect(),
         }
     }
     fn handle_pr_req(&mut self, req: PrReq) {
