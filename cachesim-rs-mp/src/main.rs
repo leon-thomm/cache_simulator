@@ -272,12 +272,17 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
 
 // caches
 
+enum PrReq {
+    Read(Addr),
+    Write(Addr),
+}
+
 #[derive(Clone)]
 enum CacheMsg {
     Tick,
     PostTick,
-    PrSig,
-    BusSig,
+    PrSig(ProcReq),
+    BusSig(BusSignal),
     BusLocked,
     BusReqResolved,
     PrReqResolved,
@@ -286,12 +291,12 @@ enum CacheMsg {
 enum CacheState {
     Idle,
 
-    WaitingForBus_PrSig(),
-    ResolvingPrReq(),
+    WaitingForBus_PrReq(ProcReq),
+    ResolvingPrReq(ProcReq),
     PrReqResolved,
 
-    WaitingForBus_BusSig(),
-    ResolvingBusReq(),
+    WaitingForBus_BusSig(BusSignal),
+    ResolvingBusReq(BusSignal),
     BusReqResolved,
 }
 
@@ -302,6 +307,8 @@ struct Cache<'a> {
     specs: &'a SystemSpec,
     proc_id: i32,
     bus_id: i32,
+    bus_signals_queue: VecDeque<BusSignal>,
+    pr_sig_buffer: Option<ProcReq>,
 }
 
 impl<'a> Cache<'a> {
@@ -315,11 +322,138 @@ impl<'a> Cache<'a> {
             bus_id,
         }
     }
-    fn tick(&mut self) {
+    fn handle_pr_req(&mut self, req: ProcReq) {
+        // invariant: self.state == Idle
         todo!()
     }
-    fn handle_msg(&mut self, msg: CacheMsg) {
+    fn handle_pr_req_bus_locked(&mut self, req: ProcReq) {
         todo!()
+    }
+    fn handle_bus_sig(&mut self, sig: BusSignal) {
+        // invariant: self.state == Idle
+        todo!()
+    }
+    fn handle_bus_sig_bus_locked(&mut self, sig: BusSignal) {
+        todo!()
+    }
+    fn dispatch_signals(&mut self) {
+        // check for queued bus signals
+        if let Some(sig) = self.bus_signals_queue.pop_front() {
+            self.handle_bus_sig(sig);
+        }
+        // check for queued processor signal
+        else if let Some(sig) = self.pr_sig_buffer.take() {
+            self.handle_pr_req(sig);
+        }
+        // otherwise, do nothing
+    }
+}
+
+impl MsgHandler<CacheMsg> for Cache<'_> {
+    fn handle_msg(&mut self, msg: CacheMsg) {
+        match self.state {
+            CacheState::Idle => {
+                match msg {
+                    CacheMsg::Tick => {
+                        self.dispatch_signals();
+                    },
+                    CacheMsg::PostTick => (),
+                    CacheMsg::PrSig(req) => {
+                        self.pr_sig_buffer = Some(req);
+                        self.dispatch_signals();
+                    },
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push_back(sig);
+                        self.dispatch_signals();
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::WaitingForBus_PrReq(req) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => (),
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push_back(sig);
+                    },
+                    CacheMsg::BusLocked => {
+                        self.state = CacheState::ResolvingPrReq(req.clone());
+                        self.handle_pr_req_bus_locked(req);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::ResolvingPrReq(req) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => (),
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push_back(sig);
+                    },
+                    CacheMsg::PrReqResolved => {
+                        self.state = CacheState::PrReqResolved;
+                        self.send_proc(ProcMsg::RequestResolved, 0);
+                        self.send_bus(BusMsg::ReadyToFreeNext, 0);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::PrReqResolved => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => {
+                        self.state = CacheState::Idle;
+                    },
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push_back(sig);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::WaitingForBus_BusSig(sig) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => (),
+                    CacheMsg::PrSig(req) => {
+                        self.pr_sig_buffer = Some(req);
+                    },
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push(sig);
+                    },
+                    CacheMsg::BusLocked => {
+                        self.state = CacheState::ResolvingBusReq(sig.clone());
+                        self.handle_bus_sig_bus_locked(sig);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::ResolvingBusReq(sig) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => (),
+                    CacheMsg::PrSig(req) => {
+                        self.pr_sig_buffer = Some(req);
+                    },
+                    CacheMsg::BusReqResolved => {
+                        self.state = CacheState::BusReqResolved;
+                        self.send_bus(BusMsg::ReadyToFreeNext, 0);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::BusReqResolved => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => {
+                        self.state = CacheState::Idle;
+                    },
+                    CacheMsg::PrSig(req) => {
+                        self.pr_sig_buffer = Some(req);
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+        }
     }
 }
 
