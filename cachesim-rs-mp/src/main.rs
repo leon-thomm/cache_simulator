@@ -151,34 +151,8 @@ enum Msg {
     // TickBus,
 }
 
-enum ProcMsg {
-    // Tick,
-    ReadyToProceedNext,
-}
-
-#[derive(Clone)]
-enum CacheMsg {
-    // Tick,
-    Read(Addr),
-    Write(Addr),
-    BusSignal(BusSignal),           // incoming bus signal
-    BusLocked,                      // bus is locked by the cache
-}
-
-enum BusMsg {
-    // StayBusy(i32, i32),
-    Acquire(i32),                   // locks the bus (synchronously)
-    QueueSignal(i32, BusSignal),    // queues a signal, which will lock the bus (asynchronously)
-    GoBusy,                         // for simplicity, sent by the caches
-    GoIdle,                         // for simplicity, sent by the caches
-    ReadyToFreeNext,                // frees the bus at the end of the cycle
-    // FetchQueues,
-}
-
-#[derive(Clone)]
-enum BusSignal {
-    BusRd(Addr),
-    BusRdX(Addr),
+trait MsgHandler<MsgT> {
+    fn handle_msg(&mut self, msg: MsgT);
 }
 
 // instructions
@@ -194,14 +168,20 @@ type Instructions = Vec<Instr>;
 
 // processors
 
+enum ProcMsg {
+    Tick,
+    PostTick,
+    RequestResolved,
+}
+
 #[derive(Clone, PartialEq)]
 enum ProcState {
-    Ready,
-    ExecutingOther(i32),
+    Idle,
     WaitingForCache,
+    ExecutingOther(i32),
     Done,
 
-    ProceedNext,
+    RequestResolved,
 }
 
 struct Processor<'a> {
@@ -230,10 +210,22 @@ impl<'a> Processor<'a> {
             msg: Msg::ProcToCache(self.cache_id, msg),
         }).unwrap();
     }
-    fn tick(&mut self) {
-        self.state = match self.state {
-            ProcState::Ready => {
-                match self.instructions.pop().unwrap() {
+}
+
+impl MsgHandler<ProcMsg> for Processor<'_> {
+    fn handle_msg(&mut self, msg: ProcMsg) {
+
+        let proceed = |state: &mut ProcState| {
+            if self.instructions.len() == 0 {
+                *state = ProcState::Done;
+            } else {
+                *state = ProcState::Idle;
+            }
+        };
+
+        match self.state {
+            ProcState::Idle => {
+                self.state = match self.instructions.pop().unwrap() {
                     Instr::Read(addr) => {
                         self.send_cache(CacheMsg::Read(addr), 0);
                         ProcState::WaitingForCache
@@ -246,37 +238,61 @@ impl<'a> Processor<'a> {
                         ProcState::ExecutingOther(time - 1)
                     }
                 }
-            }
-            ProcState::ExecutingOther(time) => ProcState::ExecutingOther(time - 1),
-            ProcState::WaitingForCache => ProcState::WaitingForCache,
-            ProcState::Done => ProcState::Done,
-            _ => panic!("Processor in invalid state"),
-        }
-    }
-    fn handle_msg(&mut self, msg: ProcMsg) {
-        match msg {
-            ProcMsg::ReadyToProceedNext =>
-                self.state = ProcState::ProceedNext
-        }
-    }
-    fn post_tick(&mut self) {
-        self.state = match self.state {
-            ProcState::ExecutingOther(0) => ProcState::Ready,
-            ProcState::ProceedNext => ProcState::Ready,
-            _ => self.state.clone(),
-        };
-        if self.state == ProcState::Ready && self.instructions.len() == 0 {
-            self.state = ProcState::Done;
+            },
+            ProcState::WaitingForCache => {
+                match msg {
+                    ProcMsg::RequestResolved =>
+                        self.state = ProcState::RequestResolved,
+                    ProcMsg::Tick |
+                    ProcMsg::PostTick => (),
+                }
+            },
+            ProcState::RequestResolved => {
+                match msg {
+                    ProcMsg::Tick => (),
+                    ProcMsg::PostTick => proceed(&mut self.state),
+                    _ => panic!("Processor in invalid state"),
+                }
+            },
+            ProcState::ExecutingOther(time) => {
+                match msg {
+                    ProcMsg::Tick => {
+                        self.state = ProcState::ExecutingOther(time - 1);
+                    },
+                    ProcMsg::PostTick => {
+                        if time == 0 { proceed(&mut self.state); }
+                    },
+                    _ => panic!("Processor in invalid state"),
+                }
+            },
+            ProcState::Done => (),
         }
     }
 }
 
 // caches
 
+#[derive(Clone)]
+enum CacheMsg {
+    Tick,
+    PostTick,
+    PrSig,
+    BusSig,
+    BusLocked,
+    BusReqResolved,
+    PrReqResolved,
+}
+
 enum CacheState {
     Idle,
-    ResolvingRequest(i32),
-    WaitingForBus(),
+
+    WaitingForBus_PrSig(),
+    ResolvingPrReq(),
+    PrReqResolved,
+
+    WaitingForBus_BusSig(),
+    ResolvingBusReq(),
+    BusReqResolved,
 }
 
 struct Cache<'a> {
@@ -309,17 +325,27 @@ impl<'a> Cache<'a> {
 
 // bus
 
+enum BusMsg {
+    Tick,
+    PostTick,
+    Acquire,
+    QBusSig,
+    SignalSent,
+    ReadyToFreeNext,
+}
+
+#[derive(Clone)]
+enum BusSignal {
+    BusRd(Addr),
+    BusRdX(Addr),
+    BusUpd(Addr),
+}
+
 #[derive(Clone)]
 enum BusState {
-    // possible states when the bus is not currently owned by a single cache
-    Unlocked_Idle,
-    Unlocked_Busy,
-
-    // possible states when the bus is currently owned by a single cache
-    Locked_Idle(i32),
-    Locked_Busy(i32),
-
-    // other
+    Unlocked_Idle,      // bus free / not locked
+    Unlocked_Busy,      // bus free / not locked
+    Locked(i32),   // bus is currently owned by a single cache
     FreeNext,
 }
 
@@ -398,8 +424,8 @@ impl<'a> Bus<'a> {
             // busy and idle
             (BusState::Unlocked_Idle, BusMsg::GoBusy) => BusState::Unlocked_Busy,
             (BusState::Unlocked_Busy, BusMsg::GoIdle) => BusState::Unlocked_Idle,
-            (BusState::Locked_Idle(_), BusMsg::GoBusy) => BusState::Locked_Busy,
-            (BusState::Locked_Busy(_), BusMsg::GoIdle) => BusState::Locked_Idle,
+            (BusState::Locked_Idle(cache_id), BusMsg::GoBusy) => BusState::Locked_Busy(cache_id),
+            (BusState::Locked_Busy(cache_id), BusMsg::GoIdle) => BusState::Locked_Idle(cache_id),
 
             // acquiring lock
             (_, BusMsg::Acquire(cache_id)) => {
