@@ -328,9 +328,9 @@ impl<'a> Cache<'a> {
 enum BusMsg {
     Tick,
     PostTick,
-    Acquire,
-    QBusSig,
-    SignalSent,
+    Acquire(i32),
+    BusSig(i32, BusSignal),
+    SignalSent(i32, BusSignal),
     ReadyToFreeNext,
 }
 
@@ -356,8 +356,8 @@ struct Bus<'a> {
     n: i32,
     specs: &'a SystemSpec,
     cache_ids: Vec<i32>,
-    signal_queue: VecDeque<(BusSignal, Option<i32>)>,   // signals have higher priority than explicit locks by caches
-    lock_queue: VecDeque<i32>,                          // explicit locks by caches
+    signal_queue: VecDeque<(BusSignal, i32)>,   // signals have higher priority than explicit locks by caches
+    lock_queue: VecDeque<i32>,                  // explicit locks by caches
 }
 
 impl<'a> Bus<'a> {
@@ -379,9 +379,9 @@ impl<'a> Bus<'a> {
             msg: Msg::BusToCache(cache_id, msg),
         }).unwrap();
     }
-    fn send_caches(&self, msg: CacheMsg, delay: i32, except: Option<i32>) {
+    fn send_caches(&self, msg: CacheMsg, delay: i32, except: i32) {
         for cache_id in &self.cache_ids {
-            if except.is_some() && except.unwrap() == *cache_id { continue; }
+            if except == *cache_id { continue; }
             self.send_cache(*cache_id, msg.clone(), delay);
         }
     }
@@ -391,108 +391,84 @@ impl<'a> Bus<'a> {
             msg: Msg::BusToBus(self.bus_id, msg),
         }).unwrap();
     }
-    fn fetch_queues(&mut self) -> BusState {
-        // first check if there are pending bus signals to send
-        if let Some((sig, cache_id)) = self.signal_queue.pop_front() {
-            let t = self.specs.t_cache_to_cache_msg();
-            self.send_caches(
-                CacheMsg::BusSignal(sig.clone()),
-                t,
-                cache_id);
-            self.send_self(
-                BusMsg::SignalSent(cache_id, sig.clone()),
-                t);
-            BusState::Unlocked_Busy
-        }
-        // otherwise, free to be locked by a cache
-        else if let Some(cache_id) = self.lock_queue.pop_front() {
-            self.send_cache(cache_id, BusLocked, 0);
-            BusState::Locked_Idle(cache_id)
-        } else {
-            BusState::Unlocked_Idle
-        }
-    }
-    fn tick(&mut self) {
-        match &self.state {
-            BusState::Unlocked_Idle => self.state = self.fetch_queues(),
-            _ => {}
-        }
-    }
+}
+
+impl MsgHandler<BusMsg> for Bus {
     fn handle_msg(&mut self, msg: BusMsg) {
-        self.state = match (self.state, msg) {
-
-            // busy and idle
-            (BusState::Unlocked_Idle, BusMsg::GoBusy) => BusState::Unlocked_Busy,
-            (BusState::Unlocked_Busy, BusMsg::GoIdle) => BusState::Unlocked_Idle,
-            (BusState::Locked_Idle(cache_id), BusMsg::GoBusy) => BusState::Locked_Busy(cache_id),
-            (BusState::Locked_Busy(cache_id), BusMsg::GoIdle) => BusState::Locked_Idle(cache_id),
-
-            // acquiring lock
-            (_, BusMsg::Acquire(cache_id)) => {
-                self.lock_queue.push_back(cache_id);
-                match self.state {
-                    BusState::Unlocked_Idle => self.fetch_queues(),
-                    _ => self.state.clone(),
+        match self.state {
+            BusState::Unlocked_Idle => {
+                match msg {
+                    BusMsg::Tick => {
+                        // check if there's something in the bus signal queue
+                        if let Some((sig, cache_id)) = self.signal_queue.pop_front() {
+                            let t = self.specs.t_cache_to_cache_msg();
+                            self.send_caches(
+                                CacheMsg::BusSignal(sig.clone()),
+                                t,
+                                cache_id);
+                            self.send_self(
+                                BusMsg::SignalSent(cache_id, sig.clone()),
+                                t);
+                            self.state = BusState::Unlocked_Busy;
+                        }
+                        // otherwise, free to be locked by a cache
+                        else if let Some(cache_id) = self.lock_queue.pop_front() {
+                            self.send_cache(cache_id, CacheMsg::BusLocked, 0);
+                            self.state = BusState::Locked(cache_id);
+                        }
+                    },
+                    BusMsg::PostTick => (),
+                    BusMsg::Acquire(cache_id) => {
+                        self.send_cache(cache_id, CacheMsg::BusLocked, 0);
+                        self.state = BusState::Locked_Idle(cache_id);
+                    },
+                    BusMsg::BusSig(cache_id, sig) => {
+                        let t = self.specs.t_cache_to_cache_msg();
+                        self.send_self(BusMsg::SignalSent(cache_id, sig), t);
+                        self.state = BusState::Unlocked_Busy;
+                    },
+                    _ => panic!("Invalid bus state"),
                 }
             },
-
-            // releasing lock
-            (BusState::Locked_Idle(id), BusMsg::ReadyToFreeNext) => {
-                BusState::FreeNext
+            BusState::Unlocked_Busy => {
+                match msg {
+                    BusMsg::Tick => (),
+                    BusMsg::PostTick => (),
+                    BusMsg::Acquire(cache_id) =>
+                        self.lock_queue.push_back(cache_id),
+                    BusMsg::BusSig(cache_id, sig) =>
+                        self.signal_queue.push_back((sig, cache_id)),
+                    BusMsg::SignalSent(cache_id, sig) => {
+                        self.send_caches(CacheMsg::BusSignal(sig), 0, cache_id);
+                        self.state = BusState::FreeNext;
+                    },
+                    _ => panic!("Invalid bus state"),
+                }
+            },
+            BusState::Locked(_) => {
+                match msg {
+                    BusMsg::Tick => (),
+                    BusMsg::PostTick => (),
+                    BusMsg::Acquire(cache_id) =>
+                        self.lock_queue.push_back(cache_id),
+                    BusMsg::BusSig(cache_id, sig) =>
+                        self.signal_queue.push_back((sig, cache_id)),
+                    BusMsg::SignalSent(cache_id, sig) => {
+                        self.send_caches(CacheMsg::BusSignal(sig), 0, cache_id);
+                        self.state = BusState::Locked(cache_id);
+                    },
+                    BusMsg::ReadyToFreeNext =>
+                        self.state = BusState::FreeNext,
+                }
+            },
+            BusState::FreeNext => {
+                match msg {
+                    BusMsg::PostTick =>
+                        self.state = BusState::Unlocked_Idle,
+                    _ => panic!("Invalid bus state"),
+                }
             }
-
-            // sending signals
-            (BusState::Unlocked_Idle, BusMsg::QueueSignal(cache_id, sig)) => {
-                self.signal_queue.push_back((sig, Some(cache_id)));
-                self.fetch_queues()
-            },
-            (BusState::Unlocked_Busy, BusMsg::QueueSignal(cache_id, sig)) => {
-                self.signal_queue.push_back((sig, Some(cache_id)));
-                BusState::Unlocked_Busy
-            },
-            (BusState::Locked_Idle(owner_id), BusMsg::QueueSignal(cache_id, sig)) => {
-                self.signal_queue.push_back((sig, Some(cache_id)));
-                // send signal immediately if it came from owner
-                if cache_id == owner_id { self.fetch_queues() }
-                else { BusState::Locked_Idle(owner_id) }
-            },
-
-            _ => panic!("Invalid bus state"),
         }
-        // match self.state {
-        //     BusState::Free =>
-        //         match msg {
-        //             BusMsg::Acquire(cache_id) => {
-        //                 self.state = BusState::Locked(cache_id);
-        //                 self.send_cache(cache_id, CacheMsg::BusLocked, 0);
-        //             },
-        //             BusMsg::QueueSignal(cache_id, sig) => {
-        //                 // start sending immediately
-        //                 self.state = BusState::Locked(cache_id);
-        //                 self.send_self(
-        //                     BusMsg::SendSignal(cache_id, sig),
-        //                     self.specs.t_cache_to_cache_msg() - 1);
-        //             },
-        //             _ => panic!("Bus received unexpected message"),
-        //         },
-        //     BusState::Locked(cache_id) =>
-        //         match msg {
-        //             BusMsg::SendSignal(cache_id, sig) => {
-        //                 self.send_sig(cache_id, sig)
-        //             },
-        //             BusMsg::ReadyToFreeNext => {
-        //                 self.state = BusState::FreeNext;
-        //             },
-        //         },
-        //     BusState::FreeNext =>
-        //         todo!()
-        // }
-    }
-    fn post_tick(&mut self) {
-        self.state = match self.state {
-            BusState::FreeNext => BusState::Free,
-            _ => self.state.clone(),
-        };
     }
 }
 
