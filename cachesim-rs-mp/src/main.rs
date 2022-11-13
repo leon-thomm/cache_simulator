@@ -326,8 +326,8 @@ impl CacheSet {
     fn new(specs: &SystemSpec) -> CacheSet {
         CacheSet {
             blocks: (0..specs.cache_assoc)
-                    .map(|_| Block::new(Addr(-1), specs))
-                    .collect(),
+                .map(|_| Block::new(Addr(-1), specs))
+                .collect(),
         }
     }
 }
@@ -354,8 +354,8 @@ impl<'a> Cache<'a> {
             bus_signals_queue: VecDeque::new(),
             pr_sig_buffer: None,
             data: (0..specs.cache_size/specs.cache_assoc)
-                    .map(|_| CacheSet::new(specs))
-                    .collect(),
+                .map(|_| CacheSet::new(specs))
+                .collect(),
         }
     }
     fn handle_pr_req(&mut self, req: PrReq) {
