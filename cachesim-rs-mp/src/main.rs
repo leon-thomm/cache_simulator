@@ -139,12 +139,15 @@ impl Addr {
 // messages
 
 enum Msg {
+    ToProc(i32, ProcMsg),
+    ToCache(i32, CacheMsg),
     ProcToCache(i32, CacheMsg),
     CacheToProc(i32, ProcMsg),
     CacheToCache(i32, CacheMsg),
+    ToBus(BusMsg),
     CacheToBus(i32, BusMsg),
     BusToCache(i32, CacheMsg),
-    BusToBus(i32, BusMsg),
+    BusToBus(BusMsg),
 
     // TickProc(i32),
     // TickCache(i32),
@@ -175,7 +178,7 @@ enum ProcMsg {
     RequestResolved,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum ProcState {
     Idle,
     WaitingForCache,
@@ -198,7 +201,7 @@ impl<'a> Processor<'a> {
     fn new(id: i32, cache_id: i32, instructions: Instructions, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Processor {
             id,
-            state: ProcState::Ready,
+            state: ProcState::Idle,
             instructions,
             tx,
             specs,
@@ -228,11 +231,11 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
             ProcState::Idle => {
                 self.state = match self.instructions.pop().unwrap() {
                     Instr::Read(addr) => {
-                        self.send_cache(CacheMsg::Read(addr), 0);
+                        self.send_cache(CacheMsg::PrSig(PrReq::Read(addr)), 0);
                         ProcState::WaitingForCache
                     }
                     Instr::Write(addr) => {
-                        self.send_cache(CacheMsg::Write(addr), 0);
+                        self.send_cache(CacheMsg::PrSig(PrReq::Write(addr)), 0);
                         ProcState::WaitingForCache
                     }
                     Instr::Other(time) => {
@@ -283,7 +286,7 @@ enum PrReq {
 enum CacheMsg {
     Tick,
     PostTick,
-    PrSig(ProcReq),
+    PrSig(PrReq),
     BusSig(BusSignal),
     BusLocked,
     BusReqResolved,
@@ -309,36 +312,36 @@ struct Cache<'a> {
     tx: DelQMsgSender,
     specs: &'a SystemSpec,
     proc_id: i32,
-    bus_id: i32,
     bus_signals_queue: VecDeque<BusSignal>,
-    pr_sig_buffer: Option<ProcReq>,
+    pr_sig_buffer: Option<PrReq>,
 }
 
 impl<'a> Cache<'a> {
-    fn new(id: i32, proc_id: i32, bus_id: i32, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
+    fn new(id: i32, proc_id: i32, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Cache {
             id,
             state: CacheState::Idle,
             tx,
             specs,
             proc_id,
-            bus_id,
             bus_signals_queue: VecDeque::new(),
             pr_sig_buffer: None,
         }
     }
-    fn handle_pr_req(&mut self, req: ProcReq) {
-        // invariant: self.state == Idle
+    fn handle_pr_req(&mut self, req: PrReq) {
+        // invariant: self.state == CacheState::Idle
         todo!()
     }
-    fn handle_pr_req_bus_locked(&mut self, req: ProcReq) {
+    fn handle_pr_req_bus_locked(&mut self, req: PrReq) {
+        // invariant: self.state == CacheState::ResolvingPrReq
         todo!()
     }
     fn handle_bus_sig(&mut self, sig: BusSignal) {
-        // invariant: self.state == Idle
+        // invariant: self.state == CacheState::Idle
         todo!()
     }
     fn handle_bus_sig_bus_locked(&mut self, sig: BusSignal) {
+        // invariant: self.state == CacheState::ResolvingBusReq
         todo!()
     }
     fn dispatch_signals(&mut self) {
@@ -351,6 +354,18 @@ impl<'a> Cache<'a> {
             self.handle_pr_req(sig);
         }
         // otherwise, do nothing
+    }
+    fn send_proc(&self, msg: ProcMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::CacheToProc(self.proc_id, msg),
+        }).unwrap();
+    }
+    fn send_bus(&self, msg: BusMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::CacheToBus(self.id, msg),
+        }).unwrap();
     }
 }
 
@@ -382,8 +397,9 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                         self.bus_signals_queue.push_back(sig);
                     },
                     CacheMsg::BusLocked => {
-                        self.state = CacheState::ResolvingPrReq(req.clone());
-                        self.handle_pr_req_bus_locked(req);
+                        let r = req.clone();
+                        self.state = CacheState::ResolvingPrReq(r.clone());
+                        self.handle_pr_req_bus_locked(r);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -423,11 +439,12 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                         self.pr_sig_buffer = Some(req);
                     },
                     CacheMsg::BusSig(sig) => {
-                        self.bus_signals_queue.push(sig);
+                        self.bus_signals_queue.push_back(sig);
                     },
                     CacheMsg::BusLocked => {
-                        self.state = CacheState::ResolvingBusReq(sig.clone());
-                        self.handle_bus_sig_bus_locked(sig.clone());
+                        let s = sig.clone();
+                        self.state = CacheState::ResolvingBusReq(s.clone());
+                        self.handle_bus_sig_bus_locked(s);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -490,7 +507,6 @@ enum BusState {
 }
 
 struct Bus<'a> {
-    bus_id: i32,
     state: BusState,
     tx: DelQMsgSender,
     n: i32,
@@ -501,10 +517,9 @@ struct Bus<'a> {
 }
 
 impl<'a> Bus<'a> {
-    fn new(bus_id: i32, n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
+    fn new(n: i32, cache_ids: Vec<i32>, tx: DelQMsgSender, specs: &'a SystemSpec) -> Self {
         Bus {
-            bus_id,
-            state: BusState::Free(BusFreeState::Idle),
+            state: BusState::Unlocked_Idle,
             tx,
             n,
             specs,
@@ -528,12 +543,12 @@ impl<'a> Bus<'a> {
     fn send_self(&self, msg: BusMsg, delay: i32) {
         self.tx.send(DelayedMsg {
             t: delay,
-            msg: Msg::BusToBus(self.bus_id, msg),
+            msg: Msg::BusToBus(msg),
         }).unwrap();
     }
 }
 
-impl MsgHandler<BusMsg> for Bus {
+impl MsgHandler<BusMsg> for Bus<'_> {
     fn handle_msg(&mut self, msg: BusMsg) {
         match self.state {
             BusState::Unlocked_Idle => {
@@ -543,7 +558,7 @@ impl MsgHandler<BusMsg> for Bus {
                         if let Some((sig, cache_id)) = self.signal_queue.pop_front() {
                             let t = self.specs.t_cache_to_cache_msg();
                             self.send_caches(
-                                CacheMsg::BusSignal(sig.clone()),
+                                CacheMsg::BusSig(sig.clone()),
                                 t,
                                 cache_id);
                             self.send_self(
@@ -560,7 +575,7 @@ impl MsgHandler<BusMsg> for Bus {
                     BusMsg::PostTick => (),
                     BusMsg::Acquire(cache_id) => {
                         self.send_cache(cache_id, CacheMsg::BusLocked, 0);
-                        self.state = BusState::Locked_Idle(cache_id);
+                        self.state = BusState::Locked(cache_id);
                     },
                     BusMsg::BusSig(cache_id, sig) => {
                         let t = self.specs.t_cache_to_cache_msg();
@@ -579,7 +594,7 @@ impl MsgHandler<BusMsg> for Bus {
                     BusMsg::BusSig(cache_id, sig) =>
                         self.signal_queue.push_back((sig, cache_id)),
                     BusMsg::SignalSent(cache_id, sig) => {
-                        self.send_caches(CacheMsg::BusSignal(sig), 0, cache_id);
+                        self.send_caches(CacheMsg::BusSig(sig), 0, cache_id);
                         self.state = BusState::FreeNext;
                     },
                     _ => panic!("Invalid bus state"),
@@ -594,7 +609,7 @@ impl MsgHandler<BusMsg> for Bus {
                     BusMsg::BusSig(cache_id, sig) =>
                         self.signal_queue.push_back((sig, cache_id)),
                     BusMsg::SignalSent(cache_id, sig) => {
-                        self.send_caches(CacheMsg::BusSignal(sig), 0, cache_id);
+                        self.send_caches(CacheMsg::BusSig(sig), 0, cache_id);
                         self.state = BusState::Locked(cache_id);
                     },
                     BusMsg::ReadyToFreeNext =>
@@ -640,37 +655,47 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
         Cache::new(
             i+n,
             i,
-            2*n,
             tx.clone(),
             &specs)
     }).collect::<Vec<_>>();
 
     let mut bus = Bus::new(
-        2*n,
         n,
         (n..2*n).collect::<Vec<_>>(),
         tx.clone(),
         &specs);
 
+    let send_msg = move |msg: Msg| {
+        tx.send(DelayedMsg {
+            t: 0,
+            msg,
+        }).unwrap();
+    };
+
     // simulate
     let mut cycle_count = 0;
     loop {
         // tick everyone -- THE ORDER SHOULD NOT MATTER!!
-        for i in 0..n as usize {
-            procs[i].tick();
-            caches[i].tick();
+        for proc_id in 0..n {
+            send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
         }
-        bus.tick();
+        for cache_id in 0..n {
+            send_msg(Msg::ToCache(cache_id, CacheMsg::Tick));
+        }
+        send_msg(Msg::ToBus(BusMsg::Tick));
 
         // handle messages
         while let Some(msg) = dq.try_fetch() {
             match msg {
+                Msg::ToProc(i, msg) => procs[i as usize].handle_msg(msg),
+                Msg::ToCache(i, msg) => caches[i as usize].handle_msg(msg),
                 Msg::ProcToCache(i, msg) => caches[i as usize].handle_msg(msg),
                 Msg::CacheToProc(i, msg) => procs[i as usize].handle_msg(msg),
                 Msg::CacheToCache(i, msg) => caches[i as usize].handle_msg(msg),
-                Msg::CacheToBus(i, msg) => bus.handle_msg(msg),
+                Msg::ToBus(msg) => bus.handle_msg(msg),
+                Msg::CacheToBus(_, msg) => bus.handle_msg(msg),
                 Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
-                Msg::BusToBus(i, msg) => bus.handle_msg(msg),
+                Msg::BusToBus(msg) => bus.handle_msg(msg),
             }
             if !dq.msg_available() { dq.update_q() }
         }
