@@ -166,7 +166,7 @@ enum Instr {
     Other(i32),
 }
 
-type Instructions = Vec<Instr>;
+type Instructions = VecDeque<Instr>;
 
 // processors
 
@@ -228,7 +228,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
 
         match self.state {
             ProcState::Idle => {
-                self.state = match self.instructions.pop().unwrap() {
+                self.state = match self.instructions.pop_front().unwrap() {
                     Instr::Read(addr) => {
                         self.send_cache(CacheMsg::PrSig(PrReq::Read(addr)), 0);
                         ProcState::WaitingForCache
@@ -254,7 +254,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
                 match msg {
                     ProcMsg::Tick => (),
                     ProcMsg::PostTick => proceed(&mut self.state),
-                    _ => panic!("Processor in invalid state"),
+                    ProcMsg::RequestResolved => panic!("Processor in invalid state"),
                 }
             },
             ProcState::ExecutingOther(time) => {
@@ -265,7 +265,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
                     ProcMsg::PostTick => {
                         if time == 0 { proceed(&mut self.state); }
                     },
-                    _ => panic!("Processor in invalid state"),
+                    ProcMsg::RequestResolved => panic!("Processor in invalid state"),
                 }
             },
             ProcState::Done => (),
@@ -543,7 +543,8 @@ impl<'a> Cache<'a> {
             // if we are doing something that requires asking other caches, do that before proceeding
             self.send_sim(
                 SimMsg::AskOtherCaches(addr.clone()),
-                self.specs.t_cache_to_cache_msg());
+                self.specs.t_cache_to_cache_msg() // - 1 ???
+            );
             return;
         }
 
@@ -577,9 +578,7 @@ impl<'a> Cache<'a> {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                             self.access_uncached(&addr);
                             transition(self, BlockState::Exclusive);
-                            resolve_in(self,
-                                self.specs.t_cache_to_cache_msg() +
-                                self.specs.t_mem_fetch());
+                            resolve_in(self, self.specs.t_mem_fetch());
                         }
                     },
                     PrReq::Write(addr) => {
@@ -994,7 +993,7 @@ impl MsgHandler<BusMsg> for Bus<'_> {
                 match msg {
                     BusMsg::PostTick =>
                         self.state = BusState::Unlocked_Idle,
-                    _ => panic!("Invalid bus state"),
+                    _ => {},    // wait until next cycle
                 }
             }
         }
@@ -1009,7 +1008,6 @@ enum SimMsg {
 
 fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
-
     let n = insts.len() as i32;
 
     // each component (processors, caches, bus) communicates to others by sending messages
@@ -1023,7 +1021,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
     let mut procs = (0..n).map(|i| {
         Processor::new(
             i,
-            i+n,
+            i,
             insts[i as usize].clone(),
             tx.clone(),
             &specs)
@@ -1031,7 +1029,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
     let mut caches = (0..n).map(|i| {
         Cache::new(
-            i+n,
+            i,
             i,
             tx.clone(),
             &specs)
@@ -1039,7 +1037,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
     let mut bus = Bus::new(
         n,
-        (n..2*n).collect::<Vec<_>>(),
+        (0..n).collect::<Vec<_>>(),
         tx.clone(),
         &specs);
 
@@ -1061,6 +1059,8 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
             send_msg(Msg::ToCache(cache_id, CacheMsg::Tick));
         }
         send_msg(Msg::ToBus(BusMsg::Tick));
+
+        dq.update_q();
 
         // handle messages
         while let Some(msg) = dq.try_fetch() {
@@ -1088,16 +1088,43 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
             if !dq.msg_available() { dq.update_q() }
         }
 
+        // post-tick everyone -- THE ORDER SHOULD NOT MATTER!!
+        for proc_id in 0..n {
+            procs[proc_id as usize].handle_msg(ProcMsg::PostTick);
+        }
+        for cache_id in 0..n {
+            caches[cache_id as usize].handle_msg(CacheMsg::PostTick);
+        }
+        bus.handle_msg(BusMsg::PostTick);
+
         cycle_count += 1;
         dq.update_time(cycle_count);
 
-        if procs.iter().all(|p| p.state == ProcState::Done) { break; }
+        if procs.iter().all(|p| p.state == ProcState::Done) && dq.is_empty() { break; }
+
     }
     println!("cycles: {}", cycle_count);
 }
 
 
 fn main() {
+    simulate(
+        SystemSpec::new(),
+        vec![
+            VecDeque::from(vec![
+                Instr::Read(Addr(0)),
+                Instr::Other(10),
+                Instr::Write(Addr(0)),
+            ])
+        ]
+    )
+}
+
+
+// testing
+
+#[test]
+fn test_delayed_queue() {
     // test delayed queue
 
     let (mut dq, tx) = DelayedQ::<i32>::new();
@@ -1134,5 +1161,6 @@ fn main() {
         c += 1;
         dq.update_time(c);
     }
+
     println!("done, cycles: {}", c);
 }
