@@ -145,6 +145,8 @@ enum Msg {
     CacheToBus(i32, BusMsg),
     BusToCache(i32, CacheMsg),
     BusToBus(BusMsg),
+    CacheToSim(i32, SimMsg),
+    SimToCache(i32, CacheMsg),
 
     // TickProc(i32),
     // TickCache(i32),
@@ -288,6 +290,7 @@ enum CacheMsg {
     BusLocked,
     BusReqResolved,
     PrReqResolved,
+    CachesChecked(bool),
 }
 
 #[derive(Clone)]
@@ -493,9 +496,38 @@ impl<'a> Cache<'a> {
             },
         }
     }
-    fn handle_pr_req_bus_locked(&mut self, req: PrReq) {
+    fn handle_pr_req_bus_locked(&mut self, req: PrReq, others_have_block: Option<bool>) {
         // invariant: self.state == CacheState::ResolvingPrReq
-        todo!()
+        let addr = match &req {
+            PrReq::Read(addr) => addr.clone(),
+            PrReq::Write(addr) => addr.clone(),
+        };
+
+        let req_is_write = match &req {
+            PrReq::Read(_) => false,
+            PrReq::Write(_) => true,
+        };
+        let block_is_invalid = match self.state_of(&addr) {
+            BlockState::Invalid => true,
+            _ => false,
+        };
+
+        // Todo: also need to check other caches in Dragon on
+        //  - Invalid, PrRead
+        //  - Invalid, PrWrite
+        //  - Shared Clean, PrWrite
+        //  - Shared Modified, PrWrite  (theoretically, the snooper should keep track instead, but let's ignore that)
+        if others_have_block.is_none() && !(block_is_invalid && req_is_write) {
+            // if we are doing something that requires asking other caches, do that before proceeding
+            self.send_sim(
+                SimMsg::AskOtherCaches(addr.clone()),
+                self.specs.t_cache_to_cache_msg());
+            return;
+        }
+
+        // match self.state_of(&addr) {
+        //
+        // }
     }
     fn handle_bus_sig(&mut self, sig: BusSignal) {
         // invariant: self.state == CacheState::Idle
@@ -527,6 +559,12 @@ impl<'a> Cache<'a> {
         self.tx.send(DelayedMsg {
             t: delay,
             msg: Msg::CacheToBus(self.id, msg),
+        }).unwrap();
+    }
+    fn send_sim(&self, msg: SimMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::CacheToSim(self.id, msg),
         }).unwrap();
     }
 }
@@ -561,7 +599,7 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                     CacheMsg::BusLocked => {
                         let r = req.clone();
                         self.state = CacheState::ResolvingPrReq(r.clone());
-                        self.handle_pr_req_bus_locked(r);
+                        self.handle_pr_req_bus_locked(r, None);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -578,6 +616,11 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                         self.send_proc(ProcMsg::RequestResolved, 0);
                         self.send_bus(BusMsg::ReadyToFreeNext, 0);
                     },
+                    CacheMsg::CachesChecked(others_have_block) => {
+                        self.handle_pr_req_bus_locked(
+                            req.clone(),
+                            Some(others_have_block));
+                    }
                     _ => panic!("Cache in invalid state"),
                 }
             },
@@ -791,6 +834,10 @@ impl MsgHandler<BusMsg> for Bus<'_> {
 
 // simulator
 
+enum SimMsg {
+    AskOtherCaches(Addr),  // provides interface to check info that requires broad access
+}
+
 fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
 
@@ -858,6 +905,16 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
                 Msg::CacheToBus(_, msg) => bus.handle_msg(msg),
                 Msg::BusToCache(i, msg) => caches[i as usize].handle_msg(msg),
                 Msg::BusToBus(msg) => bus.handle_msg(msg),
+                Msg::CacheToSim(i, SimMsg::AskOtherCaches(addr)) => {
+                    let hit = caches.iter().any(|c| {
+                        c.id != i && (match c.state_of(&addr) {
+                            BlockState::Invalid => false,
+                            _ => true,
+                        })
+                    });
+                    send_msg(Msg::SimToCache(i, CacheMsg::CachesChecked(hit)));
+                },
+                Msg::SimToCache(i, msg) => caches[i as usize].handle_msg(msg),
             }
             if !dq.msg_available() { dq.update_q() }
         }
