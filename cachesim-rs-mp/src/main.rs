@@ -1130,10 +1130,15 @@ fn main() {
         SystemSpec::new(),
         vec![
             VecDeque::from(vec![
-                Instr::Read(Addr(0)),
-                Instr::Other(10),
                 Instr::Write(Addr(0)),
-            ])
+                Instr::Other(3),
+                Instr::Read(Addr(0)),
+            ]),
+            VecDeque::from(vec![
+                Instr::Write(Addr(0)),
+                Instr::Other(3),
+                Instr::Read(Addr(0)),
+            ]),
         ]
     )
 }
