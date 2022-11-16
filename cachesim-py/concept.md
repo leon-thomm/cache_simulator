@@ -52,6 +52,14 @@ From the perspective of some cache $C_i$, the bus can be:
 * foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
 * free: $C_i$ can try to lock the bus in order to start sending requests
 
+***
+
+A snooping cache can receive bus signals triggering three kinds of actions (and any combinations)
+    1. the cache responding / possibly providing some data
+    2. a transition in the data cache
+    3. bus signals as a result of (2)
+
+We assume that action (1) can alays be executed immediately, given the cache currently doesn't own the bus. However, the actual data cache might be busy resolving a request from the processor, so actions (2) and (3) must be buffered and handled later. Since the incoming bus sginal should only have an effect on *future* operations in the cache (and not on the one currently running), it is safe for the cache to handle the bus signal immediately *after* completing the current processor request.
 
 ***
 
