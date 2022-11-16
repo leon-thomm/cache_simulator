@@ -381,10 +381,32 @@ impl<'a> Cache<'a> {
         }
     }
     fn access_uncached(&mut self, addr: &Addr) {
-        todo!()
+        let (index, tag) = addr.pos(self.specs);
+        match self.state_of(addr) {
+            BlockState::Invalid => {
+                self.data[index as usize].blocks.push(CacheBlock {
+                    tag,
+                    state: BlockState::Exclusive,
+                });
+            },
+            _ => panic!("Block is unexpectedly cached"),
+        }
     }
     fn access_cached(&mut self, addr: &Addr) {
-        todo!()
+        // employ LRU policy
+        let (index, tag) = addr.pos(self.specs);
+        match self.state_of(addr) {
+            BlockState::Invalid => panic!("Block is unexpectedly uncached"),
+            _ => {
+                let set = &mut self.data[index as usize];
+                let addr_index = set.blocks.iter()
+                    .position(|block| block.tag == tag)
+                    .unwrap();
+                // move block to the end of the set
+                let block = set.blocks.remove(addr_index);
+                set.blocks.push(block);
+            },
+        }
     }
     fn set_state_of(&mut self, addr: &Addr, state: BlockState) {
         let (index, tag) = addr.pos(self.specs);
