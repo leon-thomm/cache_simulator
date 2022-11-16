@@ -575,11 +575,108 @@ impl<'a> Cache<'a> {
     }
     fn handle_bus_sig(&mut self, sig: BusSignal) {
         // invariant: self.state == CacheState::Idle
-        todo!()
+
+        let addr = match &sig {
+            BusSignal::BusRd(addr) => addr.clone(),
+            BusSignal::BusRdX(addr) => addr.clone(),
+            BusSignal::BusUpd(addr) => addr.clone(),
+        };
+
+        // shorthand helper functions
+
+        let sig_ = sig.clone();
+        let acquire_bus = |self_: &mut Self| {
+            self_.state = CacheState::WaitingForBus_BusSig(sig_);
+            self_.send_bus(BusMsg::Acquire(self_.id), 0);
+        };
+
+        let transition = |self_: &mut Self, state: BlockState| {
+            self_.set_state_of(&addr, state);
+        };
+
+        match self.state_of(&addr) {
+            BlockState::Invalid => {},
+            BlockState::Shared => {
+                match sig {
+                    BusSignal::BusRd(addr) => {},
+                    BusSignal::BusRdX(addr) => {
+                        transition(self, BlockState::Invalid);
+                    },
+                    _ => {},
+                }
+            },
+            BlockState::Exclusive => {
+                match sig {
+                    BusSignal::BusRd(addr) => {
+                        transition(self, BlockState::Shared);
+                    },
+                    BusSignal::BusRdX(addr) => {
+                        // need to flush
+                        acquire_bus(self);
+                    },
+                    _ => {},
+                }
+            },
+            BlockState::Modified => {
+                match sig {
+                    BusSignal::BusRd(addr) => {
+                        // need to flush
+                        acquire_bus(self);
+                    },
+                    BusSignal::BusRdX(addr) => {
+                        // need to flush
+                        acquire_bus(self);
+                    },
+                    _ => {},
+                }
+            },
+        }
     }
     fn handle_bus_sig_bus_locked(&mut self, sig: BusSignal) {
         // invariant: self.state == CacheState::ResolvingBusReq
-        todo!()
+
+        let addr = match &sig {
+            BusSignal::BusRd(addr) => addr.clone(),
+            BusSignal::BusRdX(addr) => addr.clone(),
+            BusSignal::BusUpd(addr) => addr.clone(),
+        };
+
+        // shorthand helper functions
+
+        let transition = |self_: &mut Self, state: BlockState| {
+            self_.set_state_of(&addr, state);
+        };
+
+        let resolve_in = |self_: &mut Self, time: i32| {
+            self_.send_self(CacheMsg::BusReqResolved, time);
+        };
+
+        // state machine
+        match self.state_of(&addr) {
+            BlockState::Exclusive => {
+                match sig {
+                    BusSignal::BusRdX(addr) => {
+                        transition(self, BlockState::Invalid);
+                        resolve_in(self, self.specs.t_flush());
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            BlockState::Modified => {
+                match sig {
+                    BusSignal::BusRd(addr) => {
+                        transition(self, BlockState::Shared);
+                        resolve_in(self, self.specs.t_flush());
+                    },
+                    BusSignal::BusRdX(addr) => {
+                        transition(self, BlockState::Invalid);
+                        resolve_in(self, self.specs.t_flush());
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            _ => panic!("Cache in invalid state"),
+        }
     }
     fn dispatch_signals(&mut self) {
         // check for queued bus signals
