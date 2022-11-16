@@ -525,9 +525,53 @@ impl<'a> Cache<'a> {
             return;
         }
 
-        // match self.state_of(&addr) {
-        //
-        // }
+        // shorthand helper functions
+
+        let transition = |self_: &mut Self, state: BlockState| {
+            self_.set_state_of(&addr, state);
+        };
+
+        let send_bus_tx = |self_: &mut Self, signal: BusSignal| {
+            self_.send_bus(BusMsg::BusSig(self_.id, signal), 0);
+        };
+
+        let resolve_in = |self_: &mut Self, time: i32| {
+            self_.send_self(CacheMsg::PrReqResolved, time);
+        };
+
+        // state machine
+        match self.state_of(&addr) {
+            BlockState::Invalid => {
+                match &req {
+                    PrReq::Read(addr) => {
+                        if let Some(true) = others_have_block {
+                            send_bus_tx(self, BusSignal::BusRd(addr.clone()));
+                            self.access_uncached(&addr);
+                            transition(self, BlockState::Shared);
+                            resolve_in(self,
+                            self.specs.t_cache_to_cache_msg() +
+                                self.specs.t_cache_to_cache_transfer());
+                        } else {
+                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            self.access_uncached(&addr);
+                            transition(self, BlockState::Exclusive);
+                            resolve_in(self,
+                                self.specs.t_cache_to_cache_msg() +
+                                self.specs.t_mem_fetch());
+                        }
+                    },
+                    PrReq::Write(addr) => {
+                        // means we had to flush the block
+                        send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                        self.access_uncached(&addr);
+                        transition(self, BlockState::Modified);
+                        resolve_in(self,
+                            self.specs.t_flush());
+                    }
+                }
+            },
+            _ => panic!("Cache in invalid state"),
+        }
     }
     fn handle_bus_sig(&mut self, sig: BusSignal) {
         // invariant: self.state == CacheState::Idle
@@ -565,6 +609,12 @@ impl<'a> Cache<'a> {
         self.tx.send(DelayedMsg {
             t: delay,
             msg: Msg::CacheToSim(self.id, msg),
+        }).unwrap();
+    }
+    fn send_self(&self, msg: CacheMsg, delay: i32) {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::CacheToCache(self.id, msg),
         }).unwrap();
     }
 }
