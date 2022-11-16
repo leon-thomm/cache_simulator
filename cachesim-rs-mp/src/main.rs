@@ -291,6 +291,7 @@ enum CacheMsg {
     BusReqResolved,
     PrReqResolved,
     CachesChecked(bool),
+    CachesChecked_Proceed(PrReq, bool),
 }
 
 #[derive(Clone)]
@@ -299,6 +300,7 @@ enum CacheState {
 
     WaitingForBus_PrReq(PrReq),
     ResolvingPrReq(PrReq),
+    ResolvingPrReq_UsingBus(PrReq),
     PrReqResolved,
 
     WaitingForBus_BusSig(BusSignal),
@@ -543,7 +545,7 @@ impl<'a> Cache<'a> {
             // if we are doing something that requires asking other caches, do that before proceeding
             self.send_sim(
                 SimMsg::AskOtherCaches(addr.clone()),
-                self.specs.t_cache_to_cache_msg() // - 1 ???
+                self.specs.t_cache_to_cache_msg() - 1
             );
             return;
         }
@@ -571,14 +573,12 @@ impl<'a> Cache<'a> {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr);
                             transition(self, BlockState::Shared);
-                            resolve_in(self,
-                            self.specs.t_cache_to_cache_msg() +
-                                self.specs.t_cache_to_cache_transfer());
+                            resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                             self.access_uncached(&addr);
                             transition(self, BlockState::Exclusive);
-                            resolve_in(self, self.specs.t_mem_fetch());
+                            resolve_in(self, self.specs.t_mem_fetch() - 1);
                         }
                     },
                     PrReq::Write(addr) => {
@@ -586,8 +586,7 @@ impl<'a> Cache<'a> {
                         send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                         self.access_uncached(&addr);
                         transition(self, BlockState::Modified);
-                        resolve_in(self,
-                            self.specs.t_flush());
+                        resolve_in(self, self.specs.t_flush() - 1);
                     }
                 }
             },
@@ -789,6 +788,25 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                             req.clone(),
                             Some(others_have_block));
                     }
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::ResolvingPrReq_UsingBus(req) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => (),
+                    CacheMsg::BusSig(sig) => {
+                        self.bus_signals_queue.push_back(sig);
+                    },
+                    CacheMsg::CachesChecked(others_have_block) => {
+                        // end of cycle, proceed in next
+                        self.send_self(CacheMsg::CachesChecked_Proceed(
+                            req.clone(),
+                            others_have_block), 1);
+                    },
+                    CacheMsg::CachesChecked_Proceed(req, others_have_block) => {
+                        self.handle_pr_req_bus_locked(req, Some(others_have_block));
+                    },
                     _ => panic!("Cache in invalid state"),
                 }
             },
