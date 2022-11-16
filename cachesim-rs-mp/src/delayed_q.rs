@@ -80,6 +80,9 @@ impl<MsgType> DelayedQ<MsgType> {
             self.ord_ctr += 1;
         }
     }
+    pub fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
     pub fn msg_available(&self) -> bool {
         if let Some(msg) = self.q.peek() {
             if      msg.t == self.time { true }
