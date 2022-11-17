@@ -1,12 +1,14 @@
 extern crate core;
 
 mod delayed_q;
+mod delayed_q_unhashed;
 
 use std::collections::VecDeque;
 use std::{env, fs};
 use std::fs::File;
 use std::io::Read;
-use crate::delayed_q::*;
+// use crate::delayed_q::*;
+use crate::delayed_q_unhashed::*;
 use crate::ProcState::Done;
 
 type DelQMsgSender = DelQSender<Msg>;
@@ -149,6 +151,7 @@ impl Addr {
 
 // messages
 
+#[derive(Clone)]
 enum Msg {
     ToProc(i32, ProcMsg),
     ToCache(i32, CacheMsg),
@@ -1235,6 +1238,7 @@ impl SystemState {
     }
 }
 
+#[derive(Clone)]
 enum SimMsg {
     AskOtherCaches(Addr),  // provides interface to check info that requires broad access
 }
@@ -1292,48 +1296,6 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
 
     let mut system_state = SystemState::new();
     loop {
-
-        // let no_cache_may_progress = caches.iter().all(|c| match &c.state {
-        //     // true if cache cannot make progress on tick or post_tick
-        //     CacheState::ResolvingPrReq(_, Some(_)) |
-        //     CacheState::ResolvingBusReq_ProceedNext |
-        //     CacheState::AskingCaches_ProceedNext(_, _) => false,
-        //     _ => true,
-        // });
-        // let no_proc_may_progress = procs.iter().all(|p| match &p.state {
-        //     // true if processor cannot make progress on tick or post_tick
-        //     Done | ProcState::WaitingForCache => true,
-        //     _ => false,
-        // });
-        // let bus_may_not_progress = match &bus.state {
-        //     // true if the bus cannot make progress on tick or post_tick
-        //     BusState::FreeNext => false,
-        //     _ => true,
-        // } && bus.lock_queue.is_empty() && bus.signal_queue.is_empty();
-        // let nobody_may_make_progress =
-        //     no_cache_may_progress &&
-        //         no_proc_may_progress &&
-        //         bus_may_not_progress;
-
-        // store system state
-        // let new_system_state = SystemState {
-        //     proc_states: procs.iter().map(|p| p.state.clone()).collect(),
-        //     cache_states: caches.iter().map(|c| c.state.clone()).collect(),
-        //     bus_state: bus.state.clone(),
-        // };
-        // if (new_system_state == system_state) &&
-        //     dq.is_empty() &&
-        //     no_proc_may_progress &&
-        //     no_cache_may_progress &&
-        //     bus_may_not_progress {
-        //
-        //     println!("ERROR in cycle {}: system state is stuck. states:\n{:?}", cycle_count, system_state);
-        //
-        //     // let x = dq.is_empty();
-        //     // dq.is_empty();
-        // }
-        // system_state = new_system_state;
-
         cycle_count += 1;
         dq.update_time(cycle_count);
         let all_procs_done = procs.iter().all(|p| p.state == Done);
@@ -1350,7 +1312,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
         }
         for cache_id in 0..n {
             match &caches[cache_id as usize].state {
-                CacheState::Idle | CacheState::ResolvingPrReq(_, _) =>
+                CacheState::Idle | CacheState::ResolvingPrReq(_, Some(_)) =>
                     send_msg(Msg::ToCache(cache_id, CacheMsg::Tick)),
                 _ => continue,
             };
@@ -1397,8 +1359,10 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
 
         if print_states {
             Printer::print_row(cycle_count, &procs, &caches, &bus);
-        } else if cycle_count - last_printed_cycle_count > 10000 {
-            print!("\r{}", cycle_count);
+        } else if cycle_count - last_printed_cycle_count > 100000 {
+            let instruction_counts =
+                procs.iter().map(|p| format!("{:<15}", p.instructions.len())).collect::<Vec<_>>();
+            println!("{}\t\t{}", cycle_count, instruction_counts.join("\t"));
             last_printed_cycle_count = cycle_count;
         }
 
@@ -1461,13 +1425,20 @@ fn main() {
         specs = SystemSpec { ..Default::default() };
         testname = "small_blackscholes";
     }
+
+    use std::time::Instant;
+    let t0 = Instant::now();
+
     simulate(
         // load system specs from command line args
         specs,
         read_testfiles(testname),
         false,
         true,
-    )
+    );
+
+    let t1 = Instant::now();
+    println!("time elapsed {:?}", t1-t0);
 }
 
 
