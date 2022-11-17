@@ -3,7 +3,11 @@ extern crate core;
 mod delayed_q;
 
 use std::collections::VecDeque;
+use std::{env, fs};
+use std::fs::File;
+use std::io::Read;
 use crate::delayed_q::*;
+use crate::ProcState::Done;
 
 type DelQMsgSender = DelQSender<Msg>;
 
@@ -130,7 +134,7 @@ impl SystemSpec {
 
 // addresses and blocks
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 struct Addr(i32);
 
 impl Addr {
@@ -223,18 +227,17 @@ impl<'a> Processor<'a> {
             msg: Msg::ProcToCache(self.cache_id, msg),
         }).unwrap();
     }
+    fn proceed(&mut self) {
+        if self.instructions.len() == 0 {
+            self.state = ProcState::Done;
+        } else {
+            self.state = ProcState::Idle;
+        }
+    }
 }
 
 impl MsgHandler<ProcMsg> for Processor<'_> {
     fn handle_msg(&mut self, msg: ProcMsg) {
-
-        let proceed = |state: &mut ProcState| {
-            if self.instructions.len() == 0 {
-                *state = ProcState::Done;
-            } else {
-                *state = ProcState::Idle;
-            }
-        };
 
         match self.state {
             ProcState::Idle => {
@@ -263,7 +266,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
             ProcState::RequestResolved => {
                 match msg {
                     ProcMsg::Tick => (),
-                    ProcMsg::PostTick => proceed(&mut self.state),
+                    ProcMsg::PostTick => self.proceed(),
                     ProcMsg::RequestResolved => panic!("Processor in invalid state"),
                 }
             },
@@ -273,7 +276,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
                         self.state = ProcState::ExecutingOther(time - 1);
                     },
                     ProcMsg::PostTick => {
-                        if time == 0 { proceed(&mut self.state); }
+                        if time == 0 { self.proceed(); }
                     },
                     ProcMsg::RequestResolved => panic!("Processor in invalid state"),
                 }
@@ -285,7 +288,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
 
 // caches
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum PrReq {
     Read(Addr),
     Write(Addr),
@@ -303,7 +306,7 @@ enum CacheMsg {
     CachesChecked(bool),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum CacheState {
     Idle,
 
@@ -1042,14 +1045,14 @@ enum BusMsg {
     ReadyToFreeNext,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum BusSignal {
     BusRd(Addr),
     BusRdX(Addr),
     BusUpd(Addr),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum BusState {
     Unlocked_Idle,      // bus free / not locked
     Unlocked_Busy,      // bus free / not locked
@@ -1185,12 +1188,7 @@ impl MsgHandler<BusMsg> for Bus<'_> {
 
 // pretty printing
 
-struct Printer{
-    cycle_width: i32,
-    proc_width: i32,
-    cache_width: i32,
-    bus_width: i32,
-}
+struct Printer{}
 impl Printer {
     pub fn print_header(procs: &Vec<Processor>, caches: &Vec<Cache>, bus: &Bus) {
         let mut s = String::new();
@@ -1221,11 +1219,29 @@ impl Printer {
 
 // simulator
 
+#[derive(PartialEq, Debug)]
+struct SystemState {
+    proc_states: Vec<ProcState>,
+    cache_states: Vec<CacheState>,
+    bus_state: BusState,
+}
+impl SystemState {
+    fn new() -> Self {
+        SystemState {
+            proc_states: Vec::new(),
+            cache_states: Vec::new(),
+            bus_state: BusState::Unlocked_Idle,
+        }
+    }
+}
+
 enum SimMsg {
     AskOtherCaches(Addr),  // provides interface to check info that requires broad access
 }
 
-fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
+fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, optimize: bool) {
+
+    println!("initializing simulation...");
 
     let n = insts.len() as i32;
 
@@ -1267,18 +1283,78 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
         }).unwrap();
     };
 
+    println!("done. starting simulation");
+
     // simulate
-    let mut cycle_count = 0;
-    Printer::print_header(&procs, &caches, &bus);
-    Printer::print_row(cycle_count, &procs, &caches, &bus);
+    let mut cycle_count = -1;
+    let mut last_printed_cycle_count = -1;
+    if print_states { Printer::print_header(&procs, &caches, &bus); }
+
+    let mut system_state = SystemState::new();
     loop {
-        print!("");
+
+        // let no_cache_may_progress = caches.iter().all(|c| match &c.state {
+        //     // true if cache cannot make progress on tick or post_tick
+        //     CacheState::ResolvingPrReq(_, Some(_)) |
+        //     CacheState::ResolvingBusReq_ProceedNext |
+        //     CacheState::AskingCaches_ProceedNext(_, _) => false,
+        //     _ => true,
+        // });
+        // let no_proc_may_progress = procs.iter().all(|p| match &p.state {
+        //     // true if processor cannot make progress on tick or post_tick
+        //     Done | ProcState::WaitingForCache => true,
+        //     _ => false,
+        // });
+        // let bus_may_not_progress = match &bus.state {
+        //     // true if the bus cannot make progress on tick or post_tick
+        //     BusState::FreeNext => false,
+        //     _ => true,
+        // } && bus.lock_queue.is_empty() && bus.signal_queue.is_empty();
+        // let nobody_may_make_progress =
+        //     no_cache_may_progress &&
+        //         no_proc_may_progress &&
+        //         bus_may_not_progress;
+
+        // store system state
+        // let new_system_state = SystemState {
+        //     proc_states: procs.iter().map(|p| p.state.clone()).collect(),
+        //     cache_states: caches.iter().map(|c| c.state.clone()).collect(),
+        //     bus_state: bus.state.clone(),
+        // };
+        // if (new_system_state == system_state) &&
+        //     dq.is_empty() &&
+        //     no_proc_may_progress &&
+        //     no_cache_may_progress &&
+        //     bus_may_not_progress {
+        //
+        //     println!("ERROR in cycle {}: system state is stuck. states:\n{:?}", cycle_count, system_state);
+        //
+        //     // let x = dq.is_empty();
+        //     // dq.is_empty();
+        // }
+        // system_state = new_system_state;
+
+        cycle_count += 1;
+        dq.update_time(cycle_count);
+        let all_procs_done = procs.iter().all(|p| p.state == Done);
+        if all_procs_done && dq.is_empty() { break; }
+        // if optimize && !dq.msg_available() && nobody_may_make_progress { continue; }
+
         // tick everyone -- THE ORDER SHOULD NOT MATTER!!
         for proc_id in 0..n {
-            send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
+            match procs[proc_id as usize].state {
+                Done | ProcState::WaitingForCache => continue,
+                _ => send_msg(Msg::ToProc(proc_id, ProcMsg::Tick)),
+            };
+            // send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
         }
         for cache_id in 0..n {
-            send_msg(Msg::ToCache(cache_id, CacheMsg::Tick));
+            match &caches[cache_id as usize].state {
+                CacheState::Idle | CacheState::ResolvingPrReq(_, _) =>
+                    send_msg(Msg::ToCache(cache_id, CacheMsg::Tick)),
+                _ => continue,
+            };
+            // send_msg(Msg::ToCache(cache_id, CacheMsg::Tick));
         }
         send_msg(Msg::ToBus(BusMsg::Tick));
 
@@ -1319,36 +1395,78 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
         }
         bus.handle_msg(BusMsg::PostTick);
 
-        cycle_count += 1;
-        dq.update_time(cycle_count);
-
-        Printer::print_row(cycle_count, &procs, &caches, &bus);
-
-        if procs.iter().all(|p| p.state == ProcState::Done) && dq.is_empty() { break; }
+        if print_states {
+            Printer::print_row(cycle_count, &procs, &caches, &bus);
+        } else if cycle_count - last_printed_cycle_count > 10000 {
+            print!("\r{}", cycle_count);
+            last_printed_cycle_count = cycle_count;
+        }
 
     }
     println!("cycles: {}", cycle_count);
 }
 
 
+fn read_testfiles(testname: &str) -> Vec<Instructions> {
+    let mut insts = Vec::new();
+    let paths = fs::read_dir("../tests/").unwrap();
+    // iterate all files that start with `testname`
+    for path in paths.filter_map(|p| p.ok()).filter(|p| {
+        p.file_name().to_str().unwrap().starts_with(testname) &&
+        p.file_name().to_str().unwrap().ends_with(".data")
+    }) {
+        println!("reading file: {:?}", path.file_name());
+        let mut f = File::open(path.path()).unwrap();
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        let mut insts_for_proc = VecDeque::new();
+        for line in s.lines() {
+            let mut parts = line.split_whitespace();
+            let inst = parts.next().unwrap().parse::<i32>().unwrap();
+            let val = i32::from_str_radix(
+                parts.next().unwrap().trim_start_matches("0x"),
+                16).unwrap();
+            insts_for_proc.push_back(match inst {
+                0 => Instr::Read(Addr(val)),
+                1 => Instr::Write(Addr(val)),
+                2 => Instr::Other(val),
+                _ => panic!("invalid instruction"),
+            });
+        }
+        insts.push(insts_for_proc);
+    }
+    println!("done");
+    insts
+}
+
+
 fn main() {
-    simulate(
-        SystemSpec {
+    let args: Vec<String> = env::args().collect();
+    let specs;
+    let testname;
+    if args.len() > 1 {
+        specs = SystemSpec {
+            protocol: match args[1].as_str() {
+                "MESI" => Protocol::MESI,
+                "Dragon" => Protocol::Dragon,
+                _ => panic!("invalid protocol argument"),
+            },
+            cache_size: args[3].parse().unwrap(),
+            cache_assoc: args[4].parse().unwrap(),
+            block_size: args[5].parse().unwrap(),
             ..Default::default()
-        },
-        vec![
-            VecDeque::from(vec![
-                Instr::Read(Addr(0)),
-                Instr::Other(10),
-                Instr::Write(Addr(0)),
-                // Instr::Other(2),
-                // Instr::Read(Addr(1)),
-                // Instr::Other(3),
-                // Instr::Read(Addr(0)),
-                // Instr::Other(4),
-                // Instr::Write(Addr(1)),
-            ])
-        ]
+        };
+        testname = args[2].as_str();
+    } else {
+        specs = SystemSpec { ..Default::default() };
+        testname = "small_blackscholes";
+    }
+    simulate(
+        // load system specs from command line args
+        specs,
+        read_testfiles(testname),
+        false,
+        true,
     )
 }
 

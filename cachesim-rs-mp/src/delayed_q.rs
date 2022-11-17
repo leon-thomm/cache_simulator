@@ -80,7 +80,8 @@ impl<MsgType> DelayedQ<MsgType> {
             self.ord_ctr += 1;
         }
     }
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&mut self) -> bool {
+        // self.update_q();
         self.q.is_empty()
     }
     pub fn msg_available(&self) -> bool {
