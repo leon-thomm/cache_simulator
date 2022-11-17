@@ -382,14 +382,11 @@ impl<'a> Cache<'a> {
             _ => false
         }
     }
-    fn access_uncached(&mut self, addr: &Addr) {
+    fn access_uncached(&mut self, addr: &Addr, state: BlockState) {
         let (index, tag) = addr.pos(self.specs);
         match self.state_of(addr) {
             BlockState::Invalid => {
-                self.data[index as usize].blocks.push(CacheBlock {
-                    tag,
-                    state: BlockState::Exclusive,
-                });
+                self.data[index as usize].blocks.push(CacheBlock { tag, state, });
             },
             _ => panic!("Block is unexpectedly cached"),
         }
@@ -461,7 +458,7 @@ impl<'a> Cache<'a> {
                             acquire_bus(self);
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr);
+                            self.access_uncached(&addr, BlockState::Modified);
                             proc_proceed(self);
                             idle(self);
                         }
@@ -571,21 +568,21 @@ impl<'a> Cache<'a> {
                     PrReq::Read(addr) => {
                         if let Some(true) = others_have_block {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
-                            self.access_uncached(&addr);
-                            transition(self, BlockState::Shared);
+                            self.access_uncached(&addr, BlockState::Shared);
+                            // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr);
-                            transition(self, BlockState::Exclusive);
+                            self.access_uncached(&addr, BlockState::Exclusive);
+                            // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
                         }
                     },
                     PrReq::Write(addr) => {
                         // means we had to flush the block
                         send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                        self.access_uncached(&addr);
-                        transition(self, BlockState::Modified);
+                        self.access_uncached(&addr, BlockState::Modified);
+                        // transition(self, BlockState::Modified);
                         resolve_in(self, self.specs.t_flush() - 1);
                     }
                 }
@@ -677,7 +674,7 @@ impl<'a> Cache<'a> {
                 match sig {
                     BusSignal::BusRdX(addr) => {
                         transition(self, BlockState::Invalid);
-                        resolve_in(self, self.specs.t_flush());
+                        resolve_in(self, self.specs.t_flush() - 1);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -686,11 +683,11 @@ impl<'a> Cache<'a> {
                 match sig {
                     BusSignal::BusRd(addr) => {
                         transition(self, BlockState::Shared);
-                        resolve_in(self, self.specs.t_flush());
+                        resolve_in(self, self.specs.t_flush() - 1);
                     },
                     BusSignal::BusRdX(addr) => {
                         transition(self, BlockState::Invalid);
-                        resolve_in(self, self.specs.t_flush());
+                        resolve_in(self, self.specs.t_flush() - 1);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -947,7 +944,7 @@ impl MsgHandler<BusMsg> for Bus<'_> {
                     BusMsg::Tick => {
                         // check if there's something in the bus signal queue
                         if let Some((sig, cache_id)) = self.signal_queue.pop_front() {
-                            let t = self.specs.t_cache_to_cache_msg();
+                            let t = self.specs.t_cache_to_cache_msg() - 1;
                             self.send_caches(
                                 CacheMsg::BusSig(sig.clone()),
                                 t,
@@ -969,7 +966,7 @@ impl MsgHandler<BusMsg> for Bus<'_> {
                         self.state = BusState::Locked(cache_id);
                     },
                     BusMsg::BusSig(cache_id, sig) => {
-                        let t = self.specs.t_cache_to_cache_msg();
+                        let t = self.specs.t_cache_to_cache_msg() - 1;
                         self.send_self(BusMsg::SignalSent(cache_id, sig), t);
                         self.state = BusState::Unlocked_Busy;
                     },
@@ -1009,9 +1006,14 @@ impl MsgHandler<BusMsg> for Bus<'_> {
             },
             BusState::FreeNext => {
                 match msg {
+                    BusMsg::Tick => (),
                     BusMsg::PostTick =>
                         self.state = BusState::Unlocked_Idle,
-                    _ => {},    // wait until next cycle
+                    BusMsg::Acquire(cache_id) =>
+                        self.lock_queue.push_back(cache_id),
+                    BusMsg::BusSig(cache_id, sig) =>
+                        self.signal_queue.push_back((sig, cache_id)),
+                    _ => panic!("Invalid bus state"),
                 }
             }
         }
@@ -1069,6 +1071,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
     // simulate
     let mut cycle_count = 0;
     loop {
+        print!("");
         // tick everyone -- THE ORDER SHOULD NOT MATTER!!
         for proc_id in 0..n {
             send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
@@ -1130,15 +1133,16 @@ fn main() {
         SystemSpec::new(),
         vec![
             VecDeque::from(vec![
+                Instr::Read(Addr(0)),
+                Instr::Other(10),
                 Instr::Write(Addr(0)),
+                Instr::Other(2),
+                Instr::Read(Addr(1)),
                 Instr::Other(3),
                 Instr::Read(Addr(0)),
-            ]),
-            VecDeque::from(vec![
-                Instr::Write(Addr(0)),
-                Instr::Other(3),
-                Instr::Read(Addr(0)),
-            ]),
+                Instr::Other(4),
+                Instr::Write(Addr(1)),
+            ])
         ]
     )
 }
