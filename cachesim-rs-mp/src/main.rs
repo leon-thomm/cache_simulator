@@ -73,8 +73,13 @@ Your program should generate the following output:
 
 // system specs
 
+enum Protocol {
+    MESI,
+    Dragon,
+}
+
 struct SystemSpec {
-    protocol: String,
+    protocol: Protocol,
     word_size: i32,
     address_size: i32,
     mem_lat: i32,
@@ -85,10 +90,10 @@ struct SystemSpec {
     cache_assoc: i32,
 }
 
-impl SystemSpec {
-    fn new() -> Self {
+impl Default for SystemSpec {
+    fn default() -> Self {
         SystemSpec {
-            protocol: "MESI".into(),
+            protocol: Protocol::MESI,
             word_size: 4,       // bytes
             address_size: 4,    // bytes
             mem_lat: 100,       // cpu cycles
@@ -99,6 +104,8 @@ impl SystemSpec {
             cache_assoc: 2,     // blocks
         }
     }
+}
+impl SystemSpec {
     // timing
     fn t_cache_to_cache_msg(&self) -> i32 {
         // assuming immediate response through wired OR
@@ -1167,7 +1174,9 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
 
 fn main() {
     simulate(
-        SystemSpec::new(),
+        SystemSpec {
+            ..Default::default()
+        },
         vec![
             VecDeque::from(vec![
                 Instr::Read(Addr(0)),
