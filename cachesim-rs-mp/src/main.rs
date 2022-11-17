@@ -322,10 +322,16 @@ struct CacheBlock {
 
 #[derive(Clone, Debug)]
 enum BlockState {
-    Invalid,
-    Shared,
-    Exclusive,
-    Modified,
+    MESI_Invalid,
+    MESI_Shared,
+    MESI_Exclusive,
+    MESI_Modified,
+
+    Dragon_Invalid,
+    Dragon_SharedClean,
+    Dragon_SharedModified,
+    Dragon_Exclusive,
+    Dragon_Modified,
 }
 
 struct CacheSet<'a> {
@@ -378,21 +384,24 @@ impl<'a> Cache<'a> {
         let block_state = set.blocks.iter()
             .find(|block| block.tag == tag)
             .map(|block| block.state.clone())
-            .unwrap_or(BlockState::Invalid);
+            .unwrap_or(match self.specs.protocol {
+                Protocol::MESI => BlockState::MESI_Invalid,
+                Protocol::Dragon => BlockState::Dragon_Invalid,
+            });
         block_state
     }
     fn access_causes_flush(&self, addr: &Addr) -> bool {
         let (set, tag) = self.set_and_tag_of(addr);
         let set_is_full = set.blocks.len() == self.specs.cache_assoc as usize;
         match self.state_of(addr) {
-            BlockState::Invalid => set_is_full,
+            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => set_is_full,
             _ => false
         }
     }
     fn access_uncached(&mut self, addr: &Addr, state: BlockState) {
         let (index, tag) = addr.pos(self.specs);
         match self.state_of(addr) {
-            BlockState::Invalid => {
+            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => {
                 self.data[index as usize].blocks.push(CacheBlock { tag, state, });
             },
             _ => panic!("Block is unexpectedly cached"),
@@ -402,7 +411,7 @@ impl<'a> Cache<'a> {
         // employ LRU policy
         let (index, tag) = addr.pos(self.specs);
         match self.state_of(addr) {
-            BlockState::Invalid => panic!("Block is unexpectedly uncached"),
+            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => panic!("Block is unexpectedly uncached"),
             _ => {
                 let set = &mut self.data[index as usize];
                 let addr_index = set.blocks.iter()
@@ -457,7 +466,7 @@ impl<'a> Cache<'a> {
 
         // state machine
         match self.state_of(&addr) {
-            BlockState::Invalid => {
+            BlockState::MESI_Invalid => {
                 match req {
                     PrReq::Read(addr) => acquire_bus(self),
                     PrReq::Write(addr) => {
@@ -465,14 +474,14 @@ impl<'a> Cache<'a> {
                             acquire_bus(self);
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr, BlockState::Modified);
+                            self.access_uncached(&addr, BlockState::MESI_Modified);
                             proc_proceed(self);
                             idle(self);
                         }
                     }
                 }
             },
-            BlockState::Shared => {
+            BlockState::MESI_Shared => {
                 match req {
                     PrReq::Read(addr) => {
                         // send_bus_tx(BusSignal::BusRd(addr));
@@ -482,14 +491,14 @@ impl<'a> Cache<'a> {
                     },
                     PrReq::Write(addr) => {
                         send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                        transition(self, BlockState::Modified);
+                        transition(self, BlockState::MESI_Modified);
                         self.access_cached(&addr);
                         proc_proceed(self);
                         idle(self);
                     }
                 }
             },
-            BlockState::Exclusive => {
+            BlockState::MESI_Exclusive => {
                 match req {
                     PrReq::Read(addr) => {
                         // send_bus_tx(BusSignal::BusRd(addr));
@@ -499,14 +508,14 @@ impl<'a> Cache<'a> {
                     },
                     PrReq::Write(addr) => {
                         // send_bus_tx(BusSignal::BusRdX(addr));
-                        transition(self, BlockState::Modified);
+                        transition(self, BlockState::MESI_Modified);
                         self.access_cached(&addr);
                         proc_proceed(self);
                         idle(self);
                     }
                 }
             },
-            BlockState::Modified => {
+            BlockState::MESI_Modified => {
                 match req {
                     PrReq::Read(addr) => {
                         // send_bus_tx(BusSignal::BusRd(addr));
@@ -522,6 +531,7 @@ impl<'a> Cache<'a> {
                     }
                 }
             },
+            _ => {}
         }
     }
     fn handle_pr_req_bus_locked(&mut self, req: PrReq, others_have_block: Option<bool>) {
@@ -536,7 +546,7 @@ impl<'a> Cache<'a> {
             PrReq::Write(_) => true,
         };
         let block_is_invalid = match self.state_of(&addr) {
-            BlockState::Invalid => true,
+            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => true,
             _ => false,
         };
 
@@ -571,17 +581,17 @@ impl<'a> Cache<'a> {
 
         // state machine
         match self.state_of(&addr) {
-            BlockState::Invalid => {
+            BlockState::MESI_Invalid => {
                 match &req {
                     PrReq::Read(addr) => {
                         if let Some(true) = others_have_block {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
-                            self.access_uncached(&addr, BlockState::Shared);
+                            self.access_uncached(&addr, BlockState::MESI_Shared);
                             // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr, BlockState::Exclusive);
+                            self.access_uncached(&addr, BlockState::MESI_Exclusive);
                             // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
                         }
@@ -589,7 +599,7 @@ impl<'a> Cache<'a> {
                     PrReq::Write(addr) => {
                         // means we had to flush the block
                         send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                        self.access_uncached(&addr, BlockState::Modified);
+                        self.access_uncached(&addr, BlockState::MESI_Modified);
                         // transition(self, BlockState::Modified);
                         resolve_in(self, self.specs.t_flush() - 1);
                     }
@@ -621,20 +631,20 @@ impl<'a> Cache<'a> {
         };
 
         match self.state_of(&addr) {
-            BlockState::Invalid => {},
-            BlockState::Shared => {
+            BlockState::MESI_Invalid => {},
+            BlockState::MESI_Shared => {
                 match sig {
                     BusSignal::BusRd(addr) => {},
                     BusSignal::BusRdX(addr) => {
-                        transition(self, BlockState::Invalid);
+                        transition(self, BlockState::MESI_Invalid);
                     },
                     _ => {},
                 }
             },
-            BlockState::Exclusive => {
+            BlockState::MESI_Exclusive => {
                 match sig {
                     BusSignal::BusRd(addr) => {
-                        transition(self, BlockState::Shared);
+                        transition(self, BlockState::MESI_Shared);
                     },
                     BusSignal::BusRdX(addr) => {
                         // need to flush
@@ -643,7 +653,7 @@ impl<'a> Cache<'a> {
                     _ => {},
                 }
             },
-            BlockState::Modified => {
+            BlockState::MESI_Modified => {
                 match sig {
                     BusSignal::BusRd(addr) => {
                         // need to flush
@@ -656,6 +666,7 @@ impl<'a> Cache<'a> {
                     _ => {},
                 }
             },
+            _ => {}
         }
     }
     fn handle_bus_sig_bus_locked(&mut self, sig: BusSignal) {
@@ -679,23 +690,23 @@ impl<'a> Cache<'a> {
 
         // state machine
         match self.state_of(&addr) {
-            BlockState::Exclusive => {
+            BlockState::MESI_Exclusive => {
                 match sig {
                     BusSignal::BusRdX(addr) => {
-                        transition(self, BlockState::Invalid);
+                        transition(self, BlockState::MESI_Invalid);
                         resolve_in(self, self.specs.t_flush() - 1);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
             },
-            BlockState::Modified => {
+            BlockState::MESI_Modified => {
                 match sig {
                     BusSignal::BusRd(addr) => {
-                        transition(self, BlockState::Shared);
+                        transition(self, BlockState::MESI_Shared);
                         resolve_in(self, self.specs.t_flush() - 1);
                     },
                     BusSignal::BusRdX(addr) => {
-                        transition(self, BlockState::Invalid);
+                        transition(self, BlockState::MESI_Invalid);
                         resolve_in(self, self.specs.t_flush() - 1);
                     },
                     _ => panic!("Cache in invalid state"),
@@ -1140,7 +1151,7 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
                 Msg::CacheToSim(i, SimMsg::AskOtherCaches(addr)) => {
                     let hit = caches.iter().any(|c| {
                         c.id != i && (match c.state_of(&addr) {
-                            BlockState::Invalid => false,
+                            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => false,
                             _ => true,
                         })
                     });
