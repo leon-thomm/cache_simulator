@@ -1,3 +1,5 @@
+extern crate core;
+
 mod delayed_q;
 
 use std::collections::VecDeque;
@@ -611,9 +613,9 @@ impl<'a> Cache<'a> {
         let dragon = self.specs.protocol == Protocol::Dragon;
 
         // if we are doing something that requires asking other caches, do that before proceeding
-        let need_to_ask_other_caches = others_have_block.is_none() &&
+        let need_to_ask_other_caches = others_have_block.is_none() && (
             (mesi && !(block_is_invalid && req_is_write)) ||
-            (dragon && (block_is_invalid || (req_is_write && block_is_shared)));
+            (dragon && (block_is_invalid || (req_is_write && block_is_shared))));
             // for Dragon, we naively ask other caches every time we write
         if need_to_ask_other_caches {
             self.send_sim(
@@ -675,7 +677,7 @@ impl<'a> Cache<'a> {
                             // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                         } else {
-                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_Exclusive);
                             // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
@@ -683,17 +685,53 @@ impl<'a> Cache<'a> {
                     },
                     PrReq::Write(addr) => {
                         if let Some(true) = others_have_block {
-                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr, BlockState::Dragon_Modified);
+                            send_bus_tx(self, BusSignal::BusRd(addr.clone()));
+                            send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_SharedModified);
                             resolve_in(self, 0);
                         } else {
-                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
-                            self.access_uncached(&addr, BlockState::Dragon_SharedModified);
+                            send_bus_tx(self, BusSignal::BusRd(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_Modified);
                             resolve_in(self, 0);
                         }
                     }
                 };
                 self.state = CacheState::ResolvingPrReq(req, None);
+            },
+            BlockState::Dragon_SharedClean => {
+                match &req {
+                    PrReq::Write(addr) => {
+                        if let Some(true) = others_have_block {
+                            send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
+                            self.access_cached(&addr);
+                            transition(self, BlockState::Dragon_SharedModified);
+                            resolve_in(self, 0);
+                        } else {
+                            send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
+                            self.access_cached(&addr);
+                            transition(self, BlockState::Dragon_Modified);
+                            resolve_in(self, 0);
+                        }
+                    },
+                    _ => panic!("Cache in invalid state"),
+                };
+            },
+            BlockState::Dragon_SharedModified => {
+                match &req {
+                    PrReq::Write(addr) => {
+                        if let Some(true) = others_have_block {
+                            send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
+                            self.access_cached(&addr);
+                            resolve_in(self, 0);
+                        } else {
+                            send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
+                            self.access_cached(&addr);
+                            transition(self, BlockState::Dragon_Modified);
+                            resolve_in(self, 0);
+                        }
+                    },
+                    _ => panic!("Cache in invalid state"),
+                };
             },
             _ => panic!("Cache in invalid state"),
         }
@@ -751,6 +789,27 @@ impl<'a> Cache<'a> {
                     BusSignal::BusRdX(addr) => {
                         // need to flush
                         acquire_bus(self);
+                    },
+                    _ => {},
+                }
+            },
+
+            BlockState::Dragon_SharedModified => {
+                match sig {
+                    // BusRd requires us to deliver cache line - we can ignore this here
+                    BusSignal::BusUpd(addr) => {
+                        transition(self, BlockState::Dragon_SharedClean);
+                    },
+                    _ => {},
+                }
+            },
+            BlockState::Dragon_Modified => {
+                match sig {
+                    BusSignal::BusRd(addr) => {
+                        transition(self, BlockState::Dragon_SharedModified);
+                    },
+                    BusSignal::BusUpd(addr) => {
+                        transition(self, BlockState::Dragon_SharedClean);
                     },
                     _ => {},
                 }
