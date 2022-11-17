@@ -1020,6 +1020,94 @@ impl MsgHandler<BusMsg> for Bus<'_> {
     }
 }
 
+// pretty printing
+
+struct Printer{
+    cycle_width: i32,
+    proc_width: i32,
+    cache_width: i32,
+    bus_width: i32,
+}
+impl Printer {
+    pub fn print_header(procs: &Vec<Processor>, caches: &Vec<Cache>, bus: &Bus) {
+        let mut s = String::new();
+        s.push_str(&format!("{:<6} | ", "cycle"));
+        for proc in procs {
+            s.push_str(&format!("P{:<20} | ", proc.id));
+        }
+        for cache in caches {
+            s.push_str(&format!("C{:<30} | ", cache.id));
+        }
+        s.push_str(&format!("{:<15}", "Bus"));
+        println!("{}", s);
+    }
+    pub fn print_row(cycle: i32, procs: &Vec<Processor>, caches: &Vec<Cache>, bus: &Bus) {
+        // print a nice table of the states of all processors, caches, and the bus
+        let mut s = String::new();
+        s.push_str(&format!("{:<6} | ", cycle));
+        for proc in procs {
+            s.push_str(&format!("{:<20} | ", format!("{:?}", proc.state)));
+        }
+        for cache in caches {
+            s.push_str(&format!("{: <30} | ", format!("{:?}", cache.state)));
+        }
+        s.push_str(&format!("{: <15}", format!("{:?}", bus.state)));
+        println!("{}", s);
+    }
+}
+
+// simulator
+
+enum SimMsg {
+    AskOtherCaches(Addr),  // provides interface to check info that requires broad access
+}
+
+fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
+
+    let n = insts.len() as i32;
+
+    // each component (processors, caches, bus) communicates to others by sending messages
+    // to the simulator (main thread) via channels which will forward messages to the
+    // intended recipient
+
+    // implement everything single-threaded for now
+
+    let (mut dq, tx) = DelayedQ::<Msg>::new();
+
+    let mut procs = (0..n).map(|i| {
+        Processor::new(
+            i,
+            i,
+            insts[i as usize].clone(),
+            tx.clone(),
+            &specs)
+    }).collect::<Vec<_>>();
+
+    let mut caches = (0..n).map(|i| {
+        Cache::new(
+            i,
+            i,
+            tx.clone(),
+            &specs)
+    }).collect::<Vec<_>>();
+
+    let mut bus = Bus::new(
+        n,
+        (0..n).collect::<Vec<_>>(),
+        tx.clone(),
+        &specs);
+
+    let send_msg = move |msg: Msg| {
+        tx.send(DelayedMsg {
+            t: 0,
+            msg,
+        }).unwrap();
+    };
+
+    // simulate
+    let mut cycle_count = 0;
+    Printer::print_header(&procs, &caches, &bus);
+    Printer::print_row(cycle_count, &procs, &caches, &bus);
 // simulator
 
 enum SimMsg {
