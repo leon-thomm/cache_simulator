@@ -120,7 +120,7 @@ impl SystemSpec {
 
 // addresses and blocks
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Addr(i32);
 
 impl Addr {
@@ -177,7 +177,7 @@ enum ProcMsg {
     RequestResolved,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum ProcState {
     Idle,
     WaitingForCache,
@@ -275,7 +275,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
 
 // caches
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum PrReq {
     Read(Addr),
     Write(Addr),
@@ -291,21 +291,21 @@ enum CacheMsg {
     BusReqResolved,
     PrReqResolved,
     CachesChecked(bool),
-    CachesChecked_Proceed(PrReq, bool),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum CacheState {
     Idle,
 
     WaitingForBus_PrReq(PrReq),
-    ResolvingPrReq(PrReq),
-    ResolvingPrReq_UsingBus(PrReq),
-    PrReqResolved,
+    ResolvingPrReq(PrReq, Option<bool>),
+    ResolvingPrReq_ProceedNext,
+    AskingCaches(PrReq),
+    AskingCaches_ProceedNext(PrReq, bool),
 
     WaitingForBus_BusSig(BusSignal),
     ResolvingBusReq(BusSignal),
-    BusReqResolved,
+    ResolvingBusReq_ProceedNext,
 }
 
 struct CacheBlock {
@@ -313,7 +313,7 @@ struct CacheBlock {
     state: BlockState,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum BlockState {
     Invalid,
     Shared,
@@ -544,6 +544,7 @@ impl<'a> Cache<'a> {
                 SimMsg::AskOtherCaches(addr.clone()),
                 self.specs.t_cache_to_cache_msg() - 1
             );
+            self.state = CacheState::AskingCaches(req);
             return;
         }
 
@@ -585,7 +586,8 @@ impl<'a> Cache<'a> {
                         // transition(self, BlockState::Modified);
                         resolve_in(self, self.specs.t_flush() - 1);
                     }
-                }
+                };
+                self.state = CacheState::ResolvingPrReq(req, None);
             },
             _ => panic!("Cache in invalid state"),
         }
@@ -762,59 +764,54 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                     },
                     CacheMsg::BusLocked => {
                         let r = req.clone();
-                        self.state = CacheState::ResolvingPrReq(r.clone());
+                        self.state = CacheState::ResolvingPrReq(r.clone(), None);
                         self.handle_pr_req_bus_locked(r, None);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
             },
-            CacheState::ResolvingPrReq(req) => {
+            CacheState::ResolvingPrReq(req, others_have_block) => {
                 match msg {
-                    CacheMsg::Tick => (),
-                    CacheMsg::PostTick => (),
-                    CacheMsg::BusSig(sig) => {
-                        self.bus_signals_queue.push_back(sig);
+                    CacheMsg::Tick => {
+                        if others_have_block.is_some() {
+                            self.handle_pr_req_bus_locked(req.clone(), others_have_block.clone());
+                        }
                     },
+                    CacheMsg::PostTick => (),
                     CacheMsg::PrReqResolved => {
-                        self.state = CacheState::PrReqResolved;
+                        self.state = CacheState::ResolvingPrReq_ProceedNext;
                         self.send_proc(ProcMsg::RequestResolved, 0);
                         self.send_bus(BusMsg::ReadyToFreeNext, 0);
                     },
-                    CacheMsg::CachesChecked(others_have_block) => {
-                        self.handle_pr_req_bus_locked(
-                            req.clone(),
-                            Some(others_have_block));
-                    }
                     _ => panic!("Cache in invalid state"),
                 }
             },
-            CacheState::ResolvingPrReq_UsingBus(req) => {
+            CacheState::AskingCaches(req) => {
                 match msg {
                     CacheMsg::Tick => (),
                     CacheMsg::PostTick => (),
-                    CacheMsg::BusSig(sig) => {
-                        self.bus_signals_queue.push_back(sig);
-                    },
                     CacheMsg::CachesChecked(others_have_block) => {
-                        // end of cycle, proceed in next
-                        self.send_self(CacheMsg::CachesChecked_Proceed(
+                        self.state = CacheState::AskingCaches_ProceedNext(
                             req.clone(),
-                            others_have_block), 1);
-                    },
-                    CacheMsg::CachesChecked_Proceed(req, others_have_block) => {
-                        self.handle_pr_req_bus_locked(req, Some(others_have_block));
+                            others_have_block);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
             },
-            CacheState::PrReqResolved => {
+            CacheState::AskingCaches_ProceedNext(req, others_have_block) => {
+                match msg {
+                    CacheMsg::Tick => (),
+                    CacheMsg::PostTick => {
+                        self.state = CacheState::ResolvingPrReq(req.clone(), Some(*others_have_block));
+                    },
+                    _ => panic!("Cache in invalid state"),
+                }
+            },
+            CacheState::ResolvingPrReq_ProceedNext => {
                 match msg {
                     CacheMsg::Tick => (),
                     CacheMsg::PostTick => {
                         self.state = CacheState::Idle;
-                    },
-                    CacheMsg::BusSig(sig) => {
-                        self.bus_signals_queue.push_back(sig);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -845,13 +842,13 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                         self.pr_sig_buffer = Some(req);
                     },
                     CacheMsg::BusReqResolved => {
-                        self.state = CacheState::BusReqResolved;
+                        self.state = CacheState::ResolvingBusReq_ProceedNext;
                         self.send_bus(BusMsg::ReadyToFreeNext, 0);
                     },
                     _ => panic!("Cache in invalid state"),
                 }
             },
-            CacheState::BusReqResolved => {
+            CacheState::ResolvingBusReq_ProceedNext => {
                 match msg {
                     CacheMsg::Tick => (),
                     CacheMsg::PostTick => {
@@ -879,14 +876,14 @@ enum BusMsg {
     ReadyToFreeNext,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum BusSignal {
     BusRd(Addr),
     BusRdX(Addr),
     BusUpd(Addr),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum BusState {
     Unlocked_Idle,      // bus free / not locked
     Unlocked_Busy,      // bus free / not locked
@@ -1108,56 +1105,6 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
     let mut cycle_count = 0;
     Printer::print_header(&procs, &caches, &bus);
     Printer::print_row(cycle_count, &procs, &caches, &bus);
-// simulator
-
-enum SimMsg {
-    AskOtherCaches(Addr),  // provides interface to check info that requires broad access
-}
-
-fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
-
-    let n = insts.len() as i32;
-
-    // each component (processors, caches, bus) communicates to others by sending messages
-    // to the simulator (main thread) via channels which will forward messages to the
-    // intended recipient
-
-    // implement everything single-threaded for now
-
-    let (mut dq, tx) = DelayedQ::<Msg>::new();
-
-    let mut procs = (0..n).map(|i| {
-        Processor::new(
-            i,
-            i,
-            insts[i as usize].clone(),
-            tx.clone(),
-            &specs)
-    }).collect::<Vec<_>>();
-
-    let mut caches = (0..n).map(|i| {
-        Cache::new(
-            i,
-            i,
-            tx.clone(),
-            &specs)
-    }).collect::<Vec<_>>();
-
-    let mut bus = Bus::new(
-        n,
-        (0..n).collect::<Vec<_>>(),
-        tx.clone(),
-        &specs);
-
-    let send_msg = move |msg: Msg| {
-        tx.send(DelayedMsg {
-            t: 0,
-            msg,
-        }).unwrap();
-    };
-
-    // simulate
-    let mut cycle_count = 0;
     loop {
         print!("");
         // tick everyone -- THE ORDER SHOULD NOT MATTER!!
@@ -1209,6 +1156,8 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>) {
         cycle_count += 1;
         dq.update_time(cycle_count);
 
+        Printer::print_row(cycle_count, &procs, &caches, &bus);
+
         if procs.iter().all(|p| p.state == ProcState::Done) && dq.is_empty() { break; }
 
     }
@@ -1224,12 +1173,12 @@ fn main() {
                 Instr::Read(Addr(0)),
                 Instr::Other(10),
                 Instr::Write(Addr(0)),
-                Instr::Other(2),
-                Instr::Read(Addr(1)),
-                Instr::Other(3),
-                Instr::Read(Addr(0)),
-                Instr::Other(4),
-                Instr::Write(Addr(1)),
+                // Instr::Other(2),
+                // Instr::Read(Addr(1)),
+                // Instr::Other(3),
+                // Instr::Read(Addr(0)),
+                // Instr::Other(4),
+                // Instr::Write(Addr(1)),
             ])
         ]
     )
