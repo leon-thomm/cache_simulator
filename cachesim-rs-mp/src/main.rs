@@ -73,6 +73,7 @@ Your program should generate the following output:
 
 // system specs
 
+#[derive(PartialEq, Debug)]
 enum Protocol {
     MESI,
     Dragon,
@@ -531,7 +532,57 @@ impl<'a> Cache<'a> {
                     }
                 }
             },
-            _ => {}
+
+            BlockState::Dragon_Invalid => acquire_bus(self),
+            BlockState::Dragon_SharedClean => {
+                match req {
+                    PrReq::Read(addr) => {
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => acquire_bus(self),
+                }
+            },
+            BlockState::Dragon_SharedModified => {
+                match req {
+                    PrReq::Read(addr) => {
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => acquire_bus(self),
+                }
+            },
+            BlockState::Dragon_Exclusive => {
+                match req {
+                    PrReq::Read(addr) => {
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => {
+                        transition(self, BlockState::Dragon_Modified);
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    }
+                }
+            },
+            BlockState::Dragon_Modified => {
+                match req {
+                    PrReq::Read(addr) => {
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    },
+                    PrReq::Write(addr) => {
+                        self.access_cached(&addr);
+                        proc_proceed(self);
+                        idle(self);
+                    }
+                }
+            },
         }
     }
     fn handle_pr_req_bus_locked(&mut self, req: PrReq, others_have_block: Option<bool>) {
@@ -549,14 +600,22 @@ impl<'a> Cache<'a> {
             BlockState::MESI_Invalid | BlockState::Dragon_Invalid => true,
             _ => false,
         };
+        let block_is_shared = match self.state_of(&addr) {
+            BlockState::MESI_Shared |
+            BlockState::Dragon_SharedClean |
+            BlockState::Dragon_SharedModified =>
+                true,
+            _ => false,
+        };
+        let mesi = self.specs.protocol == Protocol::MESI;
+        let dragon = self.specs.protocol == Protocol::Dragon;
 
-        // Todo: also need to check other caches in Dragon on
-        //  - Invalid, PrRead
-        //  - Invalid, PrWrite
-        //  - Shared Clean, PrWrite
-        //  - Shared Modified, PrWrite  (theoretically, the snooper should keep track instead, but let's ignore that)
-        if others_have_block.is_none() && !(block_is_invalid && req_is_write) {
-            // if we are doing something that requires asking other caches, do that before proceeding
+        // if we are doing something that requires asking other caches, do that before proceeding
+        let need_to_ask_other_caches = others_have_block.is_none() &&
+            (mesi && !(block_is_invalid && req_is_write)) ||
+            (dragon && (block_is_invalid || (req_is_write && block_is_shared)));
+            // for Dragon, we naively ask other caches every time we write
+        if need_to_ask_other_caches {
             self.send_sim(
                 SimMsg::AskOtherCaches(addr.clone()),
                 self.specs.t_cache_to_cache_msg() - 1
@@ -602,6 +661,36 @@ impl<'a> Cache<'a> {
                         self.access_uncached(&addr, BlockState::MESI_Modified);
                         // transition(self, BlockState::Modified);
                         resolve_in(self, self.specs.t_flush() - 1);
+                    }
+                };
+                self.state = CacheState::ResolvingPrReq(req, None);
+            },
+
+            BlockState::Dragon_Invalid => {
+                match &req {
+                    PrReq::Read(addr) => {
+                        if let Some(true) = others_have_block {
+                            send_bus_tx(self, BusSignal::BusRd(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_SharedClean);
+                            // transition(self, BlockState::Shared);
+                            resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
+                        } else {
+                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_Exclusive);
+                            // transition(self, BlockState::Exclusive);
+                            resolve_in(self, self.specs.t_mem_fetch() - 1);
+                        }
+                    },
+                    PrReq::Write(addr) => {
+                        if let Some(true) = others_have_block {
+                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_Modified);
+                            resolve_in(self, 0);
+                        } else {
+                            send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
+                            self.access_uncached(&addr, BlockState::Dragon_SharedModified);
+                            resolve_in(self, 0);
+                        }
                     }
                 };
                 self.state = CacheState::ResolvingPrReq(req, None);
