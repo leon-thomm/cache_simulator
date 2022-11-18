@@ -1478,7 +1478,7 @@ fn main() {
         testname = args[2].as_str();
     } else {
         specs = SystemSpec { ..Default::default() };
-        testname = "custom";
+        testname = "tiny_blackscholes";
     }
 
     let t0 = Instant::now();
@@ -1486,7 +1486,7 @@ fn main() {
         specs,
         read_testfiles(testname),
         false,
-        Some(400000),
+        None, // Some(400000),
     );
     let t1 = Instant::now();
     println!("execution time {:?}", t1-t0);

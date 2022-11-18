@@ -1,4 +1,3 @@
- 
 \documentclass{article}
 
 % IMPORT PACKAGES
@@ -23,6 +22,7 @@
 \usepackage{stackengine}
 \usepackage{xcolor}
 \usepackage{listings}
+\usepackage{hyperref}
 % BLOCKS
 \usepackage{beamerarticle}
 \usepackage[most]{tcolorbox}
@@ -121,8 +121,8 @@
 %   \part*{}
 %   \part[]{}
 
-\title{CS4223 Project 1\\Cache Simulator}
-\author{Thomm Leon Felix}
+\title{CS4223 Project 2\\Cache Simulator}
+\author{Justin Lu, Leon Thomm}
 \maketitle
 
 % changing sections enumeration style
@@ -130,7 +130,7 @@
 \renewcommand\thesection{\arabic{section}}
 \renewcommand\thesubsection{\thesection.\alph{subsection}}
 
-\section{Abstract}
+This report summarizes the specifications, main implementation aspects, and simulation findings of a MESI and Dragon cache coherence simulator that was built as a project for \textit{Multi-Core Architectures} at the \textit{National University of Singapore}. The full code can be found on \href{https://github.com/leon-thomm/cache_simulator}{GitHub}.
 
 \section{Specifications}
 
@@ -139,99 +139,262 @@
 \textbf{processor behavior}
 
 \begin{itemize}
-    \item a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response (*)
+    \item A processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response. (*)
 \end{itemize}
 
 \textbf{bus behavior}
 
 \begin{itemize}
-    \item a cache communicates with other caches through the bus, and the bus is "owned" (locked) by a cache until it completely finished his transactions corresponding to one transition in the state diagram
-    \item bus locking must be fair between the caches (request queue)
-    \item the time for sending a bus transaction (address and transaction code) to other caches takes 2 cycles - just as long as sending only an address
+    \item A cache communicates with other caches through the bus, and the bus is "owned" (locked) by a cache until it completely finished his transactions corresponding to one transition in the respective state diagram.
+    \item Bus locking must be fair between the caches (request queue-style).
+    \item The time for sending a bus transaction (address and transaction code) to other caches takes 2 cycles - just as long as sending only an address.
+    \item All queued bus signals are always transmitted before a cache can lock the bus again - this ensures consistency.
 \end{itemize}
 
 \textbf{cache behavior}
 
 \begin{itemize}
-    \item any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
-    \item while the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illionis and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it
-    \item the system always prefers cache-to-cache transfer
+    \item Any cache can always immediately respond to bus requests (*). If the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore.
+    \item While the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illinois and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it.
+    \item The system always prefers cache-to-cache transfer.
 \end{itemize}
-
-\textbf{further system and timing specs}
-
-\begin{itemize}
-    \item if cache $C_0$ tries to cache a block $b$, the action of asking other caches whether they have $b$, and the action of sending the bus signal resulting from the following transition in $C_0$ are two separate steps which both require bus communication; i.e. we ignore the fact that the other caches could theoretically infer some of these bus transactions from $C_0$'s asking
-    \item arbitration policy: the processor/cache with lower id is preferred; e.g. if P0 and P1 want to write to the same block in the same cycle, P0 will proceed and P1 will have to adapt if necessary
-    \item if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
-    \item the memory is word-addressible not, byte-addressible
-    \item memory is generally only updated on eviction/flushing
-    \item the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI\_protocol). I am assuming the state transitions on wikipedia
-    \item also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it
-    \item the caches do not flush their dirty lines at the end of the simulation - the system is assumed to run indefinitely
-\end{itemize}
-
-(*): as stated in the task description
-
-\textbf{key insights}
-
-\begin{enumerate}
-    \item The bus can only do one thing at a time, it serializes all requests.
-    \item All memory transfer goes through the bus.
-    \item There are two types of *processor events* for the cache:
-        \begin{itemize}
-            \item those that can be answered right away (unique transition)
-            \item those that require communication with other caches and possibly memory. The latter need to wait for the bus to be free (transition ambiguous, need more information), in order to lock it and then start talking to other components
-        \end{itemize}
-    \item This is not the case for *bus updates* in MESI and Dragon, these can always be handled immediately
-\end{enumerate}
-
-=> Let $C_0$ be a cache processing a processor request on address $a$ in block $b$ requiring commmunication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $b$ as well. By owning the bus, $C_0$ ensures the following
-
-\begin{itemize}
-    \item \textbf{either} $C_1$ is blocked from its transition (if it requires sending **and receiving** on bus) until $C_0$ is done and the system never enters an invalid state
-    \item \textbf{or} $C_1$'s transition does not require bidirectional communication on the bus (i.e. only sending, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $b$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done, and the bus distributes the bus signal from $C_1$ before processing any other cache requests
-\end{itemize}
-
-=> When $C_0$ owns the bus, for any processor request the simulator can determistically fully determine the time that the bus would be busy until all operations necessary to answer the request are finished.
-
-From the perspective of some cache $C_i$, the bus can be:
-
-\begin{itemize}
-    \item owned: $C_i$ can send bus requests
-    \item foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
-    \item free: $C_i$ can try to lock the bus in order to start sending requests
-\end{itemize}
-
-\end{multicols}
-
-***
 
 A snooping cache can receive bus signals triggering three kinds of actions (and any combinations)
     1. the cache responding / possibly providing some data
     2. a transition in the data cache
     3. bus signals as a result of (2)
 
-We assume that action (1) can alays be executed immediately, given the cache currently doesn't own the bus. However, the actual data cache might be busy resolving a request from the processor, so actions (2) and (3) must be buffered and handled later. Since the incoming bus sginal should only have an effect on *future* operations in the cache (and not on the one currently running), it is safe for the cache to handle the bus signal immediately *after* completing the current processor request.
+We assume that action (1) can always be executed immediately, (notice the cache currently doesn't own the bus, because the cache who asked is owning it). However, the actual data cache might be busy resolving a request from the processor, so actions (2) and (3) must be buffered and handled later. Since the incoming bus signal should only have an effect on \textit{future} operations in the cache (and not on the one currently running), it is safe for the cache to handle the bus signal immediately \textit{after} completing the current processor request.
+
+\textbf{further system and timing specs}
+
+\begin{itemize}
+    \item If cache $C_0$ tries to cache a block $b$, the action of asking other caches whether they have $b$, and the action of sending the bus signal resulting from the following transition in $C_0$ are two separate steps which both require bus communication; i.e. we ignore the fact that the other caches could theoretically infer some of these bus transactions from $C_0$'s asking.
+    \item Arbitration policy: the processor/cache with lower id is preferred; e.g. if $P_0$ and $P_1$ want to write to the same block in the same cycle, $P_0$ will proceed and $P_1$ will have to adapt if necessary
+    \item If multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle.
+    \item The memory is word-addressable not, byte-addressable.
+    \item Memory is generally only updated on eviction/flushing. Dragon never explicitly updates memory, the memory is assumed to snoop \textit{BusUpd} signals.
+    \item The caches do not flush their dirty lines at the end of the simulation.
+    \item The simulation ends when all processors entered state \textit{Done} and and the bus is idling (finished sending any pending signals).
+\end{itemize}
+
+(*) as stated in the task description
+
+\textbf{key insights}
+
+\begin{enumerate}
+    \item The bus can only do one thing at a time, it serializes all requests.
+    \item All memory transfer goes through the bus.
+    \item There are two types of signals a cache can receive: \textit{processor signals} and \textit{bus signals}.
+    \item Each of these can be further divided into
+        \begin{itemize}
+            \item those that can be answered right away
+            \item those that require communication with other caches or possibly memory
+        \end{itemize}
+\end{enumerate}
+
+$\implies$ Let $C_0$ be a cache processing a processor request on address $a$ in block $b$ requiring communication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $b$ as well. By owning the bus, $C_0$ ensures the following
+
+\begin{itemize}
+    \item \textbf{either} $C_1$ is blocked from its transition (if it requires sending \textbf{and receiving} on bus) until $C_0$ is done and the system never enters an invalid state because the bus distributes the necessary signals before $C_1$ can lock it
+    \item \textbf{or} $C_1$'s transition does not require bidirectional communication on the bus (i.e. only sending a bus signal, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $b$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done, for the same reason as above
+\end{itemize}
+
+From the perspective of some cache $C_i$, the bus can be:
+
+\begin{itemize}
+    \item owned: $C_i$ can send bus requests
+    \item foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
+    \item busy: the bus is not owned by anyone but busy sending signals
+    \item free: $C_i$ can try to acquire the bus lock in order to start sending requests
+\end{itemize}
+
+\end{multicols}
 
 \section{Implementation}
 
-\subsection{Approach 1}
+\subsection{Approach 1 - Python Prototype}
 
-\subsection{Approach 2}
+\begin{multicols}{2}
+
+We first wrote a prototype in Python to implement most of the basic concepts and gain an understanding of the challenges. This prototype works mainly by determining the number of cycles any operation will take as early as possible, and optimizes by simulating multiple cycles at once when it is safe to do so. The source code can be found on github in the \textit{cachesim-py} directory. Notice that this implementation does not yet fully follow the above specifications.
+
+\subsection{Approach 2 - High Performance in Rust}
+
+In attempt to come up with a more scalable design, we spent \textit{a lot} of time implementing a completely different solution in Rust. We chose Rust mainly for performance reasons and its design principles. Generally, a Rust implementation without any \textit{unsafe} code compiling is an extremely good indicator for the quality and stability of the written code. It can still fail, but when it does it's much more clear why and where, and most of typical sources for errors are already eliminated by the rules enforced by the compiler. Implementing the cache simulator in Rust We saw as a challenge and opportunity to try get more familiar with the language.
 
 \subsubsection{order of execution}
 
+Any simulator will have to step through a series of simulated cycles. A new cycles's rising edge (referred to as \textit{tick} from now on) reaches processor, caches, and the bus (though this can slightly differ between implementations). A single-threaded simulator will inherently have an order of ticking (e.g. $P_0$, $P_1$, $C_0$, $C_1$, \textit{bus}) causes a strong temptation to build the simulator with an exact order assumed. This, however, causes highly complex internal dependencies, makes therefore debugging really hard and the system generally un-scalable. The desire to have an implementation that is not dependent on the order of ticking and does not have any complex dependencies is what mainly inspired the design in the Rust implementation. After various failed attempts, we came up with a design that is based on to aspects: encoding every component as a \textit{finite state machine}, and only indirect communication between components using a \textit{delayed message queue} system.
+
 \subsubsection{state machines}
+
+The trade-off of encoding all internal components as finite state machines without direct communication as opposed to different components calling each other's methods all over the place comes down to simplicity vs. code size. The Rust implementation is just below 2K lines of relatively dense code, but the modular design and strict separation of responsibilities makes it much more scalable - it could probably be reasonably easily extended by similar cache coherence protocols.
+
+Important for the state diagrams are the key insights stated above, and specifically the two kinds of operations (requiring bus communication or not). Also, without an order of ticking specified, it is important when a cycle starts and when it ends (i.e. falling clock edge). On the rising edge components start to make progress, send signals to other components, process certain incoming signals, and make state transitions. The falling edge (\textit{post\_tick}) is used to make sure the component enters a new state for the next cycle, \textit{after} all signals between components regarding the current cycle have been sent and processed (so no signals are allowed to be sent during \textit{post\_tick}). This greatly simplifies the design under parameterized timing constraints.
+
+\end{multicols}
+\begin{multicols}{2}
+
+\begin{center}
+\includegraphics[width=9cm]{img/state_diagram_bus.png}
+\textsc{Bus}
+\end{center}
+
+
+\begin{center}
+\includegraphics[width=9cm]{img/state_diagram_processor.png}
+\textsc{Processors}
+\end{center}
+
+\end{multicols}
+
+\begin{center}
+\includegraphics[width=18cm]{img/state_diagram_cache.png}
+\textsc{Caches}
+\end{center}
+
+\begin{multicols}{2}
 
 \subsubsection{delayed queue}
 
-\subsubsection{optimizations}
+Building a system of communicating FSMs requires some communication channel. For this purpose, we implemented a new data-structure which is essentially a message queue with a discrete delay. Say a cache needs to send something to its processor, but this process is supposed to take two cycles. With a delayed queue interface, this is amazingly simple:
+
+\begin{code}[Rust]{}
+fn some_function() {
+    <-- snip -->
+    let send_proc = |&self_: Self, msg: ProcMsg, delay: i32| {
+        self.tx.send(DelayedMsg {
+            t: delay,
+            msg: Msg::CacheToProc(proc_id,msg),
+        }).unwrap();
+    };
+    // tx provides the interface for sending to the queue
+    send_proc(self, ProcMsg::RequestResolved, 0);
+}
+\end{code}
+
+The first fully functional implementation was based on a priority queue using binary heap, prioritized by the timestamps/delays of the messages. In an attempt to speed things up, we later re-implemented the same functionality based on a ring-buffered queue which is slower in the worst case, but faster on average than the binary heap. The ring buffer implementation turned out to be faster, especially when enabling the highest level of optimizations in \textit{rustc}.
+
+The amazing support for algebraic data types and pattern matching in Rust keeps the encoding of the state transitions simple. Below you can see how this is done by the example of a part of the message handler of the bus.
+
+\begin{code}[Rust]{Bus MsgHandler}
+impl MsgHandler<BusMsg> for Bus<'_> {
+    fn handle_msg(&mut self, msg: BusMsg) {
+        match self.state {
+            <-- see next -->
+        }
+    }
+}
+\end{code}
+
+\textit{MsgHandler} is the \textit{trait} (comparable to an \textit{interface} in Java) and \textit{handle\_msg} will be invoked by the simulator when there's a message in the queue with the current cycle as timestamp, addressed at the bus. Based on the bus's current state and the message, it can then trigger state transitions:
+
+\begin{code}[Rust]{Bus MsgHandler continued}
+<-- snip -->
+BusState::Unlocked_Idle => {
+    match msg {
+        BusMsg::Tick => {
+            // transition
+        },
+        BusMsg::PostTick => (),
+        BusMsg::Acquire(cache_id) => {
+            // transition
+        },
+        BusMsg::BusSig(cache_id, sig) => {
+            // transition
+        },
+        _ => panic!("Invalid bus state"),
+    }
+},
+BusState::Unlocked_Busy => ...
+<-- snip -->
+\end{code}
+
+\subsubsection{optimizations and accessibility}
+
+The rich type system of Rust already enables quite substantial optimizations at compile time, which can be supported by using generic types etc. The re-implementation of the delayed queue for speed was mentioned in the previous section. It is also worth noting that turning on optimizations in the rust compiler (compiling for \textit{release}, with level 3 optimizations) had a substantial impact on performance.
+
+Further code-based optimizations focused on preventing unnecessary ticks of components in states where a \textit{tick} message cannot cause any progress, which is fairly easy when all components are simply finite state machines and all communication goes through a central message queue.
+
+\begin{code}[Rust]{Simulator Optimizations}
+match procs[proc_id as usize].state {
+    // some optional optimizations
+    ProcState::WaitingForCache | ProcState::Done => continue,
+    _ => send_msg(Msg::ToProc(proc_id, Tick)),
+};
+\end{code}
+
+Furthermore, it is worth noting that this system is - by design - easily parallelizable using multi-threading. However, because of the central message queue, all threads should run on the same core (in order to share caches) when running the simulation.
+
+We also integrated some improvements over a naive MESI implementation, which include the Illinois behavior of preferring cache-to-cache transfer when possible, and the ability to continue and unlock the bus even when bus signals are pending transmission (the bus itself holds a queue for these).
+
+We also used the opportunity to do some WebAssembly (\textit{WASM}) benchmarking. We could compile the simulator to WASM architectures without any code changes. The execution time of the WASI version was only about twice that of the native one, which is quite impressive.
+
+\end{multicols}
 
 \section{Analysis}
 
 \subsection{MESI}
+Benchmark results for MESI protocol (1 KiB Cache, direct map, block size 16):\\
+
+Blackscholes:\\
+\includegraphics[width=18cm]{img/MESI.PNG}
+
+\newpage
+
+Bodytrack:\\
+\includegraphics[width=18cm]{img/MESIbodytrack.PNG}
+
+Fluidanimate:\\
+\includegraphics[width=18cm]{img/MESIfluidanimate.PNG}
+
 
 \subsection{Dragon}
+Benchmark results for Dragon protocol (1 KiB Cache, direct map, block size 16):\\
 
+Blackscholes:\\
+\includegraphics[width=18cm]{img/dragon.PNG}
+
+Bodytrack:\\
+\includegraphics[width=18cm]{img/dragonbodytrack.PNG}
+
+Fluidanimate:\\
+\includegraphics[width=18cm]{img/dragonfluidanimate.PNG}
+
+Overall, we notice very similar results when comparing the MESI and Dragon protocols for all three of the benchmarks, running with a 1K direct mapped cache with block size of 16.
+
+From running the three different benchmarks with a 1K direct mapped cache with a block size of 16, we observe that on average, the MESI protocol has nearly double the cycles per core compared to the DRAGON protocol. Both the MESI and Dragon protocols have similar miss rates, and similar proportions of their cycles spent on wait cycles. Furthermore, both the MESI and Dragon protocols have similar miss rates and private access rates. Likewise, both experience similar amounts of invalidations. However, the MESI protocol has a higher amount of bus traffic compared to the Dragon protocol.
+
+The increase in the number of execution cycles can be explained by the high cost of invalidations in the MESI protocol. With the MESI protocol, when a cache block is written to, all other caches must discard their versions of the block, whereas in the Dragon protocol, there are bus update signals that will update the data in other caches. Another factor for the increased cycles is due to our implementation of the Illinois MESI protocol, where caches can share data between one another. Cache misses require a search of all other processors' caches to see if they have the block being searched for.
+
+The increase in the volume of bus traffic in bytes in the MESI protocol can be explained by the fact that we implemented the Illinois-MESI protocol. With this protocol, we can share data between caches, so the bus will frequently transfer cache blocks between the caches of different CPUs, which adds a substantial amount of overhead in traffic.
+
+From observing the results of the Dragon and Illinois-MESI protocol across these three different benchmarks, the Dragon protocol would be preferred for each benchmark because of the lower cycle counts, as well as the lower volume of bus traffic. Using the Dragon protocol would lead to a more efficient execution with respect to these three benchmarks.
+
+\subsection{Fluidanimate on MESI}
+
+\begin{table}[!ht]
+    \centering
+    \begin{tabular}{llll}
+        \textbf{cache size} & \textbf{assiciativity} & \textbf{block size} & \textbf{avg. miss rate} \\ \hline
+        512 & 1 & 16 & 0.74105008 \\
+        512 & 2 & 16 & 0.733073148 \\
+        512 & 3 & 16 & 0.74515101 \\
+        512 & 4 & 16 & 0.72208518 \\
+        1024 & 1 & 16 & 0.6412578 \\
+        1024 & 2 & 16 & 0.60319607 \\
+        1024 & 3 & 16 & 0.594221075 \\
+        1024 & 4 & 16 & 0.611503995 \\
+        2048 & 1 & 16 & 0.5248601 \\
+        2048 & 2 & 16 & 0.491306805 \\
+        2048 & 3 & 16 & 0.467433068 \\
+        2048 & 4 & 16 & 0.47193364 \\
+        4096 & 1 & 16 & 0.446913793 \\
+        4096 & 2 & 16 & 0.39347735 \\
+        4096 & 3 & 16 & 0.37981965 \\
+        4096 & 4 & 16 & 0.372726315 \\
+    \end{tabular}
+\end{table}
+For both the MESI and Dragon protocols, as we increase the size of our cache, the average miss rate will go down. Likewise, if we increase the associativity of our cache, the average miss rate will also go down. When we increase the size of our cache, there are more spaces for blocks to be placed in. When we increase the associativity of our cache, a block of memory can be placed in more possible locations. Both of these contribute to more items being stored in our cache, reducing the miss rate.
 \end{document}
