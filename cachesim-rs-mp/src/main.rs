@@ -211,6 +211,10 @@ struct Processor<'a> {
     tx: DelQMsgSender,
     specs: &'a SystemSpec,
     cache_id: i32,
+
+    num_loads: i32,
+    num_stores: i32,
+    num_wait_cycles: i32,
 }
 
 impl<'a> Processor<'a> {
@@ -222,6 +226,10 @@ impl<'a> Processor<'a> {
             tx,
             specs,
             cache_id,
+
+            num_loads: 0,
+            num_stores: 0,
+            num_wait_cycles: 0,
         }
     }
     fn send_cache(&self, msg: CacheMsg, delay: i32) {
@@ -246,10 +254,12 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
             ProcState::Idle => {
                 self.state = match self.instructions.pop_front().unwrap() {
                     Instr::Read(addr) => {
+                        self.num_loads += 1;
                         self.send_cache(CacheMsg::PrSig(PrReq::Read(addr)), 0);
                         ProcState::WaitingForCache
                     }
                     Instr::Write(addr) => {
+                        self.num_stores += 1;
                         self.send_cache(CacheMsg::PrSig(PrReq::Write(addr)), 0);
                         ProcState::WaitingForCache
                     }
@@ -263,7 +273,7 @@ impl MsgHandler<ProcMsg> for Processor<'_> {
                     ProcMsg::RequestResolved =>
                         self.state = ProcState::RequestResolved,
                     ProcMsg::Tick |
-                    ProcMsg::PostTick => (),
+                    ProcMsg::PostTick => self.num_wait_cycles += 1,
                 }
             },
             ProcState::RequestResolved => {
@@ -369,7 +379,14 @@ struct Cache<'a> {
     proc_id: i32,
     bus_signals_queue: VecDeque<BusSignal>,
     pr_sig_buffer: Option<PrReq>,
-    data: Vec<CacheSet<'a>>
+    data: Vec<CacheSet<'a>>,
+
+    num_misses: i32,
+    num_hits: i32,
+    amt_issued_bus_traffic: i32,
+    num_invalidations: i32,
+    num_private_accesses: i32,
+    num_shared_accesses: i32,
 }
 
 impl<'a> Cache<'a> {
@@ -385,8 +402,22 @@ impl<'a> Cache<'a> {
             data: (0..specs.cache_size/specs.cache_assoc)
                 .map(|_| CacheSet::new(specs))
                 .collect(),
+
+            num_misses: 0,
+            num_hits: 0,
+            amt_issued_bus_traffic: 0,
+            num_invalidations: 0,
+            num_private_accesses: 0,
+            num_shared_accesses: 0,
         }
     }
+    // stats
+    fn inc_misses(&mut self) { self.num_misses += 1; }
+    fn inc_hits(&mut self) { self.num_hits += 1; }
+    fn inc_traffic(&mut self) { self.amt_issued_bus_traffic += self.specs.block_size; }
+    fn inc_invalidations(&mut self) { self.num_invalidations += 1; }
+    fn inc_priv_acc(&mut self) { self.num_private_accesses += 1; }
+    fn inc_shared_acc(&mut self) { self.num_shared_accesses += 1; }
     // data cache access
     fn set_and_tag_of(&self, addr: &Addr) -> (&CacheSet, i32) {
         let (index, tag) = addr.pos(self.specs);
@@ -403,15 +434,17 @@ impl<'a> Cache<'a> {
             });
         block_state
     }
-    fn access_causes_flush(&self, addr: &Addr) -> bool {
+    fn access_causes_flush(&mut self, addr: &Addr) -> bool {
         let (set, tag) = self.set_and_tag_of(addr);
         let set_is_full = set.blocks.len() == self.specs.cache_assoc as usize;
-        match self.state_of(addr) {
+        let ret = match self.state_of(addr) {
             BlockState::MESI_Invalid | BlockState::Dragon_Invalid => set_is_full,
             _ => false
-        }
+        };
+        ret
     }
     fn access_uncached(&mut self, addr: &Addr, state: BlockState) {
+        self.inc_misses();
         let (index, tag) = addr.pos(self.specs);
         if self.data[index as usize].blocks.len() == self.specs.cache_assoc as usize {
             // evict lru
@@ -421,12 +454,14 @@ impl<'a> Cache<'a> {
                 .map(|(tag, _)| *tag)
                 .unwrap();
             self.data[index as usize].blocks.remove(&lru_tag);
+            self.inc_invalidations();
         }
         self.data[index as usize].mru_ctr += 1;
         let new_key = self.data[index as usize].mru_ctr;
         self.data[index as usize].blocks.insert(tag, (new_key, CacheBlock { tag, state, }));
     }
     fn access_cached(&mut self, addr: &Addr) {
+        self.inc_hits();
         let (index, tag) = addr.pos(self.specs);
         self.data[index as usize].mru_ctr += 1;
         self.data[index as usize].blocks.get_mut(&tag).unwrap().0 =
@@ -470,11 +505,17 @@ impl<'a> Cache<'a> {
             self_.set_state_of(&addr, state);
         };
 
+        // for tracking private or shared access:
+        // if the addr is cached, then we know immediately.
+        // only if it is invalid we need to figure it out when the bus is locked
+        // (except MESI Invalid Write, we count that as private)
+
         // state machine
         match self.state_of(&addr) {
             BlockState::MESI_Invalid => {
                 match req {
-                    PrReq::Read(addr) => acquire_bus(self),
+                    PrReq::Read(addr) =>
+                        acquire_bus(self),
                     PrReq::Write(addr) => {
                         if self.access_causes_flush(&addr) {
                             acquire_bus(self);
@@ -483,6 +524,7 @@ impl<'a> Cache<'a> {
                             self.access_uncached(&addr, BlockState::MESI_Modified);
                             proc_proceed(self);
                             idle(self);
+                            self.inc_priv_acc();
                         }
                     }
                 }
@@ -503,6 +545,7 @@ impl<'a> Cache<'a> {
                         idle(self);
                     }
                 }
+                self.inc_shared_acc();
             },
             BlockState::MESI_Exclusive => {
                 match req {
@@ -520,6 +563,7 @@ impl<'a> Cache<'a> {
                         idle(self);
                     }
                 }
+                self.inc_priv_acc();
             },
             BlockState::MESI_Modified => {
                 match req {
@@ -536,6 +580,7 @@ impl<'a> Cache<'a> {
                         idle(self);
                     }
                 }
+                self.inc_priv_acc();
             },
 
             BlockState::Dragon_Invalid => acquire_bus(self),
@@ -548,6 +593,7 @@ impl<'a> Cache<'a> {
                     },
                     PrReq::Write(addr) => acquire_bus(self),
                 }
+                self.inc_shared_acc();
             },
             BlockState::Dragon_SharedModified => {
                 match req {
@@ -558,6 +604,7 @@ impl<'a> Cache<'a> {
                     },
                     PrReq::Write(addr) => acquire_bus(self),
                 }
+                self.inc_shared_acc();
             },
             BlockState::Dragon_Exclusive => {
                 match req {
@@ -573,6 +620,7 @@ impl<'a> Cache<'a> {
                         idle(self);
                     }
                 }
+                self.inc_priv_acc();
             },
             BlockState::Dragon_Modified => {
                 match req {
@@ -587,6 +635,7 @@ impl<'a> Cache<'a> {
                         idle(self);
                     }
                 }
+                self.inc_priv_acc();
             },
         }
     }
@@ -643,6 +692,8 @@ impl<'a> Cache<'a> {
             self_.send_self(CacheMsg::PrReqResolved, time);
         };
 
+        // for tracking private and shared access: see comment in handle_pr_req()
+
         // state machine
         match self.state_of(&addr) {
             BlockState::MESI_Invalid => {
@@ -653,11 +704,13 @@ impl<'a> Cache<'a> {
                             self.access_uncached(&addr, BlockState::MESI_Shared);
                             // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
+                            self.inc_shared_acc();
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                             self.access_uncached(&addr, BlockState::MESI_Exclusive);
                             // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
+                            self.inc_priv_acc();
                         }
                     },
                     PrReq::Write(addr) => {
@@ -668,6 +721,7 @@ impl<'a> Cache<'a> {
                         resolve_in(self, self.specs.t_flush() - 1);
                     }
                 };
+                self.inc_traffic();
                 self.state = CacheState::ResolvingPrReq(req, None);
             },
 
@@ -679,12 +733,15 @@ impl<'a> Cache<'a> {
                             self.access_uncached(&addr, BlockState::Dragon_SharedClean);
                             // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
+                            self.inc_shared_acc();
                         } else {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_Exclusive);
                             // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
+                            self.inc_priv_acc();
                         }
+                        self.inc_traffic();
                     },
                     PrReq::Write(addr) => {
                         if let Some(true) = others_have_block {
@@ -692,10 +749,13 @@ impl<'a> Cache<'a> {
                             send_bus_tx(self, BusSignal::BusUpd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_SharedModified);
                             resolve_in(self, 0);
+                            self.inc_shared_acc();
+                            self.inc_traffic();
                         } else {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_Modified);
                             resolve_in(self, 0);
+                            self.inc_priv_acc();
                         }
                     }
                 };
@@ -718,6 +778,7 @@ impl<'a> Cache<'a> {
                     },
                     _ => panic!("Cache in invalid state"),
                 };
+                self.inc_traffic();
             },
             BlockState::Dragon_SharedModified => {
                 match &req {
@@ -735,6 +796,7 @@ impl<'a> Cache<'a> {
                     },
                     _ => panic!("Cache in invalid state"),
                 };
+                self.inc_traffic();
             },
             _ => panic!("Cache in invalid state"),
         }
@@ -846,6 +908,7 @@ impl<'a> Cache<'a> {
                     BusSignal::BusRdX(addr) => {
                         transition(self, BlockState::MESI_Invalid);
                         resolve_in(self, self.specs.t_flush() - 1);
+                        self.inc_traffic();
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -862,6 +925,7 @@ impl<'a> Cache<'a> {
                     },
                     _ => panic!("Cache in invalid state"),
                 }
+                self.inc_traffic();
             },
             _ => panic!("Cache in invalid state"),
         }
@@ -1215,6 +1279,11 @@ impl Printer {
         s.push_str(&format!("{: <15}", format!("{:?}", bus.state)));
         println!("{}", s);
     }
+    pub fn format_row<T>(v: Vec<T>) -> String
+        where T: std::fmt::Display
+    {
+        v.iter().map(|x| format!("{:<15}", x)).collect::<Vec<_>>().join(" | ")
+    }
 }
 
 // simulator
@@ -1240,7 +1309,11 @@ enum SimMsg {
     AskOtherCaches(Addr),  // provides interface to check info that requires broad access
 }
 
-fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, optimize: bool) {
+fn simulate(
+    specs: SystemSpec,
+    insts: Vec<Instructions>,
+    print_states: bool,
+    print_cycle_infos: Option<i32>) {
 
     println!("initializing simulation...");
 
@@ -1284,6 +1357,8 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
         }).unwrap();
     };
 
+    let mut proc_done_cycles = vec![None; n as usize];
+
     println!("done. starting simulation");
 
     // simulate
@@ -1294,19 +1369,27 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
     loop {
         cycle_count += 1;
         dq.update_time(cycle_count);
+
         let all_procs_done = procs.iter().all(|p| p.state == Done);
         if all_procs_done && dq.is_empty() { break; }
-        // if optimize && !dq.msg_available() && nobody_may_make_progress { continue; }
 
-        // tick everyone -- THE ORDER SHOULD NOT MATTER!!
+        // tick everyone -- the order does not matter!!
         for proc_id in 0..n {
             match procs[proc_id as usize].state {
-                Done | ProcState::WaitingForCache => continue,
+                // some optional optimizations
+                Done => {
+                    if proc_done_cycles[proc_id as usize].is_none() {
+                        proc_done_cycles[proc_id as usize] = Some(cycle_count);
+                    }
+                    continue;
+                },
+                ProcState::WaitingForCache => continue,
                 _ => send_msg(Msg::ToProc(proc_id, ProcMsg::Tick)),
             };
             // send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
         }
         for cache_id in 0..n {
+            // some optional optimizations
             match &caches[cache_id as usize].state {
                 CacheState::Idle | CacheState::ResolvingPrReq(_, Some(_)) =>
                     send_msg(Msg::ToCache(cache_id, CacheMsg::Tick)),
@@ -1353,26 +1436,68 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
         }
         bus.handle_msg(BusMsg::PostTick);
 
+        // print runtime infos
         if print_states {
             Printer::print_row(cycle_count, &procs, &caches, &bus);
-        } else if cycle_count - last_printed_cycle_count == 400000 {
-            let instruction_counts =
-                procs.iter().map(|p| format!("{:<15}", p.instructions.len())).collect::<Vec<_>>();
-            let cycle_count_str = {
-                let mut s = String::new();
-                for (i, c) in format!("{}", cycle_count).chars().rev().enumerate() {
-                    if i>0 && i %3 == 0 { s.push('-'); }
-                    s.push(c);
-                }
-                s.chars().rev().collect::<String>()
-            };
+        } else if let Some(i) = print_cycle_infos {
+            if cycle_count - last_printed_cycle_count >= i {
+                let instruction_counts =
+                    procs.iter().map(|p| format!("{:<15}", p.instructions.len())).collect::<Vec<_>>();
+                let cycle_count_str = {
+                    let mut s = String::new();
+                    for (i, c) in format!("{}", cycle_count).chars().rev().enumerate() {
+                        if i>0 && i %3 == 0 { s.push('-'); }
+                        s.push(c);
+                    }
+                    s.chars().rev().collect::<String>()
+                };
 
-            println!("{}\t\t{}", cycle_count_str, instruction_counts.join("\t"));
-            last_printed_cycle_count = cycle_count;
+                println!("{}\t\t{}", cycle_count_str, instruction_counts.join("\t"));
+                last_printed_cycle_count = cycle_count;
+            }
         }
 
     }
-    println!("cycles: {}", cycle_count);
+
+    // print stats
+
+    let proc_done_cycles_cleaned = proc_done_cycles.iter()
+        .map(|x|
+            x.unwrap_or(cycle_count)
+        ).collect::<Vec<_>>();
+
+    println!("done! detailed stats:");
+    println!("total cycles: {}", cycle_count);
+    println!("detailed stats\n{}", Printer::format_row(
+        (0..n).map(|i| format!("core {}", i)).collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t cycles per core", Printer::format_row(
+        proc_done_cycles_cleaned
+    ));
+    println!("{:}\t\t load instructions", Printer::format_row(
+        procs.iter().map(|p| p.num_loads).collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t store instructions", Printer::format_row(
+        procs.iter().map(|p| p.num_stores).collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t wait cycles", Printer::format_row(
+        procs.iter().map(|p| p.num_wait_cycles).collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t miss rate", Printer::format_row(
+        caches.iter().map(|c| c.num_misses as f32 / (c.num_misses + c.num_hits) as f32)
+            .collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t private access rate", Printer::format_row(
+        caches.iter().map(|c|
+            c.num_private_accesses as f32 / (c.num_private_accesses + c.num_shared_accesses) as f32)
+            .collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t invalidations", Printer::format_row(
+        caches.iter().map(|c| c.num_invalidations).collect::<Vec<_>>()
+    ));
+    println!("{:}\t\t issued bus traffic [bytes]", Printer::format_row(
+        caches.iter().map(|c| c.amt_issued_bus_traffic).collect::<Vec<_>>()
+    ));
 }
 
 
@@ -1439,11 +1564,11 @@ fn main() {
         specs,
         read_testfiles(testname),
         false,
-        true,
+        Some(400000),
     );
 
     let t1 = Instant::now();
-    println!("time elapsed {:?}", t1-t0);
+    println!("execution time {:?}", t1-t0);
 }
 
 
