@@ -1,4 +1,4 @@
-// implements a message queue with discrete message delays, based on std::sync::mpsc
+// implements a message queue with discrete message delays
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -17,7 +17,6 @@ pub struct DelayedMsg<MsgType> {
     pub msg: MsgType,
 }
 
-// pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
 #[derive(Clone)]
 pub struct DelQSender<MsgType>{
     q: Rc<RefCell<DelayedQ<MsgType>>>
@@ -51,12 +50,8 @@ pub enum Err{}
 // timed message type
 
 /*
-    to avoid having to mutate every element in the queue, which would either require
-    unsafe code or rebuilding the whole heap, the queue does not decrease a delay,
-    but instead increases its timestamp. the queue uses TimedMsg where t denotes the
-    timestamp at which the message should be sent (and the monotonically increased
-    ord defines the order of different time messages within one timestamp),
-    whereas in DelayedMsg t denotes the remaining delay.
+    In TimesMsg, `t` stands for the timestamp at which the message should be made available,
+    whereas `t` in DelayedMsg stands for the delay of the message from the time of issue.
  */
 
 struct TimedMsg<MsgType> {
