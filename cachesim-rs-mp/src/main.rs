@@ -1553,7 +1553,7 @@ fn main() {
         testname = args[2].as_str();
     } else {
         specs = SystemSpec { ..Default::default() };
-        testname = "small_blackscholes";
+        testname = "custom";
     }
 
     use std::time::Instant;
