@@ -1,0 +1,237 @@
+ 
+\documentclass{article}
+
+% IMPORT PACKAGES
+\usepackage{graphicx}
+\graphicspath{{images/}}
+\usepackage{blindtext}
+\usepackage[T1]{fontenc}
+\usepackage[latin9]{inputenc}
+\usepackage[a4paper]{geometry}
+\geometry{verbose,tmargin=2cm,bmargin=2cm,lmargin=1cm,rmargin=1cm}
+\setlength{\parskip}{\smallskipamount}
+\setlength{\parindent}{0pt}
+\usepackage{array}
+\usepackage{mathtools}
+\usepackage{dsfont}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{lmodern}
+\usepackage{eqlist}
+\usepackage{babel}
+\usepackage{multicol}
+\usepackage{stackengine}
+\usepackage{xcolor}
+\usepackage{listings}
+% BLOCKS
+\usepackage{beamerarticle}
+\usepackage[most]{tcolorbox}
+%	COMMON COLORS
+\definecolor{_light_green}{rgb}{0.36, 0.84, 0.36}
+\definecolor{_light_grey}{rgb}{0.90, 0.90, 0.90}
+\definecolor{_white}{rgb}{1.0, 1.0, 1.0}
+\definecolor{_blue}{rgb}{0.0, 0.0, 1.0}
+\definecolor{_light_blue}{rgb}{0.7, 0.9, 1.0}
+%	DEFINE BOXES
+\newtcolorbox{_block}[1][]{
+    colbacktitle=_light_grey,		% title background
+    coltitle=black,					% title color
+    titlerule=0pt,
+    colback=white!50!_light_grey,	% body background
+    boxrule=0.4pt,					% content-frame padding (or frame width)
+    colframe=black!20!_light_grey,	% frame color
+    left=0mm,						% content and title left padding
+    arc=0.5pt,						% border-radius
+    title={#1},
+}
+\newtcolorbox{_example}[1][]{
+    colbacktitle=_light_green,
+    coltitle=black,
+    titlerule=0pt,
+    colback=white!60!_light_green,
+    boxrule=0pt,
+    colframe=white,
+    left=0mm,
+    arc=0.5pt,
+    title={#1},
+}
+\newtcolorbox{_note}[1][]{
+    colbacktitle=_light_blue,
+    coltitle=black,
+    titlerule=0pt,
+    colback=white!60!_light_blue,
+    boxrule=0pt,
+    colframe=white,
+    left=0mm,
+    arc=0.5pt,
+    title={#1},
+}
+\newtcolorbox{_block_emph}[1][]{
+    enhanced,
+    frame hidden,
+    borderline west={2.0pt}{0pt}{blue!60!white},
+    opacityframe=0.0,
+    colback=blue!4!white,
+    left=2mm,
+    arc=0.5pt,
+    title={#1},
+}
+%   CUSTOM CODE LISTINGS
+\newtcblisting{code}[2][]{
+	colback=blue!5!white,
+	colframe=red!75!black,
+	opacityframe=0.0,
+	coltitle=black,
+	left=5pt,
+	lefttitle=0pt,
+	enhanced,
+	listing only,
+	title=\textbf{#2},
+	arc=0.5pt,
+	listing engine=minted,
+	minted language={#1},
+	minted style=colorful,
+	minted options={
+		fontfamily=\sfdefault,%\sserif
+		fontsize=\scriptsize,
+		breaklines,
+		autogobble, %linenos, %numbersep=1mm,
+		tabsize=4,
+		escapeinside=||,mathescape=true,
+	},
+	overlay={
+		\begin{tcbclipinterior}
+			\fill[black!30!white] (frame.south west)
+			rectangle ([xshift=1mm]frame.north west);
+		\end{tcbclipinterior}
+	},
+}
+
+% below command to set inline code style doesn't work    :(
+\lstset{language=C,keywordstyle={\bfseries \color{blue}}}
+
+% \usepackage{subfiles}
+% \subfile{}
+
+% DOCUMENT
+
+\begin{document}
+
+% short title:
+%   \part*{}
+%   \part[]{}
+
+\title{CS4223 Project 1\\Cache Simulator}
+\author{Thomm Leon Felix}
+\maketitle
+
+% changing sections enumeration style
+% styles: \arabic{} \alph{} \Alph{} \roman{} \Roman{}
+\renewcommand\thesection{\arabic{section}}
+\renewcommand\thesubsection{\thesection.\alph{subsection}}
+
+\section{Abstract}
+
+\section{Specifications}
+
+\begin{multicols}{2}
+
+\textbf{processor behavior}
+
+\begin{itemize}
+    \item a processor executes instructions on every clock tick; if there's memory access it calls the cache and idles until it receives a response (*)
+\end{itemize}
+
+\textbf{bus behavior}
+
+\begin{itemize}
+    \item a cache communicates with other caches through the bus, and the bus is "owned" (locked) by a cache until it completely finished his transactions corresponding to one transition in the state diagram
+    \item bus locking must be fair between the caches (request queue)
+    \item the time for sending a bus transaction (address and transaction code) to other caches takes 2 cycles - just as long as sending only an address
+\end{itemize}
+
+\textbf{cache behavior}
+
+\begin{itemize}
+    \item any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
+    \item while the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illionis and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it
+    \item the system always prefers cache-to-cache transfer
+\end{itemize}
+
+\textbf{further system and timing specs}
+
+\begin{itemize}
+    \item if cache $C_0$ tries to cache a block $b$, the action of asking other caches whether they have $b$, and the action of sending the bus signal resulting from the following transition in $C_0$ are two separate steps which both require bus communication; i.e. we ignore the fact that the other caches could theoretically infer some of these bus transactions from $C_0$'s asking
+    \item arbitration policy: the processor/cache with lower id is preferred; e.g. if P0 and P1 want to write to the same block in the same cycle, P0 will proceed and P1 will have to adapt if necessary
+    \item if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
+    \item the memory is word-addressible not, byte-addressible
+    \item memory is generally only updated on eviction/flushing
+    \item the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI\_protocol). I am assuming the state transitions on wikipedia
+    \item also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it
+    \item the caches do not flush their dirty lines at the end of the simulation - the system is assumed to run indefinitely
+\end{itemize}
+
+(*): as stated in the task description
+
+\textbf{key insights}
+
+\begin{enumerate}
+    \item The bus can only do one thing at a time, it serializes all requests.
+    \item All memory transfer goes through the bus.
+    \item There are two types of *processor events* for the cache:
+        \begin{itemize}
+            \item those that can be answered right away (unique transition)
+            \item those that require communication with other caches and possibly memory. The latter need to wait for the bus to be free (transition ambiguous, need more information), in order to lock it and then start talking to other components
+        \end{itemize}
+    \item This is not the case for *bus updates* in MESI and Dragon, these can always be handled immediately
+\end{enumerate}
+
+=> Let $C_0$ be a cache processing a processor request on address $a$ in block $b$ requiring commmunication over the bus, and assume $C_0$ is owning the bus now and performing its operations. Let $C_1$ be another cache attempting a state transition on $b$ as well. By owning the bus, $C_0$ ensures the following
+
+\begin{itemize}
+    \item \textbf{either} $C_1$ is blocked from its transition (if it requires sending **and receiving** on bus) until $C_0$ is done and the system never enters an invalid state
+    \item \textbf{or} $C_1$'s transition does not require bidirectional communication on the bus (i.e. only sending, e.g. MESI Invalid PrWrMiss) which might put the system into a temporarily invalid state (e.g. $b$ in Modified in $C_0$ and $C_1$) but this inconsistency will be serially resolved once $C_0$ is done, and the bus distributes the bus signal from $C_1$ before processing any other cache requests
+\end{itemize}
+
+=> When $C_0$ owns the bus, for any processor request the simulator can determistically fully determine the time that the bus would be busy until all operations necessary to answer the request are finished.
+
+From the perspective of some cache $C_i$, the bus can be:
+
+\begin{itemize}
+    \item owned: $C_i$ can send bus requests
+    \item foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
+    \item free: $C_i$ can try to lock the bus in order to start sending requests
+\end{itemize}
+
+\end{multicols}
+
+***
+
+A snooping cache can receive bus signals triggering three kinds of actions (and any combinations)
+    1. the cache responding / possibly providing some data
+    2. a transition in the data cache
+    3. bus signals as a result of (2)
+
+We assume that action (1) can alays be executed immediately, given the cache currently doesn't own the bus. However, the actual data cache might be busy resolving a request from the processor, so actions (2) and (3) must be buffered and handled later. Since the incoming bus sginal should only have an effect on *future* operations in the cache (and not on the one currently running), it is safe for the cache to handle the bus signal immediately *after* completing the current processor request.
+
+\section{Implementation}
+
+\subsection{Approach 1}
+
+\subsection{Approach 2}
+
+\subsubsection{order of execution}
+
+\subsubsection{state machines}
+
+\subsubsection{delayed queue}
+
+\subsubsection{optimizations}
+
+\section{Analysis}
+
+\subsection{MESI}
+
+\subsection{Dragon}
+
+\end{document}
