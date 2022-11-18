@@ -1,0 +1,1 @@
+A fast MESI and Dragon cache coherence protocol simulator written in Rust (see `cachesim-rs`). A report of the project can be found in the `report` directory.
