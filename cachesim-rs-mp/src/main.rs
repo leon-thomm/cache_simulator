@@ -1,83 +1,23 @@
-extern crate core;
+/*
+    A Simulator for MESI (Illinois) and Dragon 4-state update-based cache coherence protocols.
+ */
 
-mod delayed_q;
+/* uncomment to use hashed, binary heap-based queue */
+// mod delayed_q;
+// use crate::delayed_q::*;
+
+/* uncomment to use un-hashed, vector-based queue */
 mod delayed_q_unhashed;
+use crate::delayed_q_unhashed::*;
 
+extern crate core;
+use std::time::Instant;
 use std::collections::{HashMap, VecDeque};
 use std::{env, fs};
 use std::fs::File;
 use std::io::Read;
-// use crate::delayed_q::*;
-use crate::delayed_q_unhashed::*;
-use crate::ProcState::Done;
 
 type DelQMsgSender = DelQSender<Msg>;
-
-/*
-    A Simulator for MESI (Illinois) and Dragon 4-state update-based cache coherence protocols.
-
-Assumptions:
-
-1. Memory address is 32-bit.
-2. Each memory reference accesses 32-bit (4-bytes) of data. That is word size is 4-bytes.
-3. We only model the data cache.
-4. Each processor has its own L1 data cache.
-5. L1 data cache uses write-back, write-allocate policy and LRU replacement policy.
-6. L1 data caches are kept coherent using one of the implemented cache coherence protocols.
-7. Initially, all the caches are empty.
-8. The bus uses first come first serve arbitration policy when multiple processor
-   attempt bus transactions simultaneously. Ties are broken arbitrarily.
-9. The L1 data caches are backed up by main memory --- there is no L2 data cache.
-10. L1 cache hit is 1 cycle. Fetching a block from memory to cache takes additional 100
-    cycles. Sending a word from one cache to another (e.g., BusUpdate) takes only 2 cycles.
-    However, sending a cache block with N words (each word is 4 bytes) to another cache
-    takes 2N cycle. Assume that evicting a dirty cache block to memory when it gets replaced
-    is 100 cycles.
-11. There may be additional assumptions.
-
-Also assume that the caches are blocking. That is, if there is a cache miss, the cache
-cannot process further requests from the core and the core is completely halted (does not
-process any instructions). However, the snooping transactions from the bus still need to
-be processed in the cache.
-In each cycle, each core can execute at most one memory reference. As per our
-assumptions, you do not need to model L1 instruction cache. So the instruction address
-trace is not included. But the core cycle counter still has to be incremented with the cycle
-value for other instructions in between two load-store instructions.
-
-The program should take an input file name and cache configurations as arguments.
-The command line should be
-
-`coherence <protocol> <input_file> <cache_size> <associativity> <block_size>`
-
-where coherence is the executable file name and input parameters are
-- <protocol>: either MESI or Dragon
-- <input_file>: input benchmark name (e.g., bodytrack)
-- <cache_size>: cache size in bytes
-- <associativity>: associativity of the cache
-- <block_size>: block size in bytes
-
-Assume default parameters as 32-bit word size, 32-byte block size, and 4KB 2-way
-set associative cache per processor.
-
-Your program should generate the following output:
-- Overall Execution Cycle (different core will complete at different cycles;
-  report the maximum value across all cores) for the entire trace as well as
-  execution cycle per core
-- Number of compute cycles per core. These are the total number of cycles
-  spent processing other instructions between load/store instructions
-- Number of load/store instructions per core
-- Number of idle cycles (these are cycles where the core is waiting for the
-  request to the cache to be completed) per core
-- Data cache miss rate for each core
-- Amount of Data traffic in bytes on the bus (this is due to bus read, bus read
-  exclusive, bus write-back, and bus update transactions). Only include the
-  traffic for data and not for address. Thus invalidation requests do not
-  contribute to the data traffic.
-- Number of invalidations or updates on the bus
-- Distribution of accesses to private data versus shared data (for example,
-  access to modified state is private, while access to shared state is shared data)
-
- */
 
 // system specs
 
@@ -92,7 +32,6 @@ struct SystemSpec {
     word_size: i32,
     address_size: i32,
     mem_lat: i32,
-    cache_hit_lat: i32,
     bus_word_tf_lat: i32,
     block_size: i32,
     cache_size: i32,
@@ -106,7 +45,6 @@ impl Default for SystemSpec {
             word_size: 4,       // bytes
             address_size: 4,    // bytes
             mem_lat: 100,       // cpu cycles
-            cache_hit_lat: 1,   // cpu cycles
             bus_word_tf_lat: 2, // cpu cycles
             block_size: 32,     // bytes
             cache_size: 4096,   // bytes
@@ -114,6 +52,7 @@ impl Default for SystemSpec {
         }
     }
 }
+
 impl SystemSpec {
     // timing
     fn t_cache_to_cache_msg(&self) -> i32 {
@@ -128,9 +67,6 @@ impl SystemSpec {
     }
     fn t_mem_fetch(&self) -> i32 {
         self.mem_lat
-    }
-    fn t_cache_hit(&self) -> i32 {
-        self.cache_hit_lat
     }
 }
 
@@ -164,10 +100,6 @@ enum Msg {
     BusToBus(BusMsg),
     CacheToSim(i32, SimMsg),
     SimToCache(i32, CacheMsg),
-
-    // TickProc(i32),
-    // TickCache(i32),
-    // TickBus,
 }
 
 trait MsgHandler<MsgT> {
@@ -198,10 +130,9 @@ enum ProcMsg {
 enum ProcState {
     Idle,
     WaitingForCache,
+    RequestResolved,
     ExecutingOther(i32),
     Done,
-
-    RequestResolved,
 }
 
 struct Processor<'a> {
@@ -667,8 +598,9 @@ impl<'a> Cache<'a> {
         // if we are doing something that requires asking other caches, do that before proceeding
         let need_to_ask_other_caches = others_have_block.is_none() && (
             (mesi && !(block_is_invalid && req_is_write)) ||
-                (dragon && (block_is_invalid || (req_is_write && block_is_shared))));
-        // for Dragon, we naively ask other caches every time we write
+            (dragon && (block_is_invalid || (req_is_write && block_is_shared)))
+        );
+        // for Dragon, we naively ask other caches every time we write to SharedModified
         if need_to_ask_other_caches {
             self.send_sim(
                 SimMsg::AskOtherCaches(addr.clone()),
@@ -679,15 +611,12 @@ impl<'a> Cache<'a> {
         }
 
         // shorthand helper functions
-
         let transition = |self_: &mut Self, state: BlockState| {
             self_.set_state_of(&addr, state);
         };
-
         let send_bus_tx = |self_: &mut Self, signal: BusSignal| {
             self_.send_bus(BusMsg::BusSig(self_.id, signal), 0);
         };
-
         let resolve_in = |self_: &mut Self, time: i32| {
             self_.send_self(CacheMsg::PrReqResolved, time);
         };
@@ -702,13 +631,11 @@ impl<'a> Cache<'a> {
                         if let Some(true) = others_have_block {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::MESI_Shared);
-                            // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                             self.inc_shared_acc();
                         } else {
                             send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                             self.access_uncached(&addr, BlockState::MESI_Exclusive);
-                            // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
                             self.inc_priv_acc();
                         }
@@ -717,7 +644,6 @@ impl<'a> Cache<'a> {
                         // means we had to flush the block
                         send_bus_tx(self, BusSignal::BusRdX(addr.clone()));
                         self.access_uncached(&addr, BlockState::MESI_Modified);
-                        // transition(self, BlockState::Modified);
                         resolve_in(self, self.specs.t_flush() - 1);
                     }
                 };
@@ -731,13 +657,11 @@ impl<'a> Cache<'a> {
                         if let Some(true) = others_have_block {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_SharedClean);
-                            // transition(self, BlockState::Shared);
                             resolve_in(self, self.specs.t_cache_to_cache_transfer() - 1);
                             self.inc_shared_acc();
                         } else {
                             send_bus_tx(self, BusSignal::BusRd(addr.clone()));
                             self.access_uncached(&addr, BlockState::Dragon_Exclusive);
-                            // transition(self, BlockState::Exclusive);
                             resolve_in(self, self.specs.t_mem_fetch() - 1);
                             self.inc_priv_acc();
                         }
@@ -811,17 +735,16 @@ impl<'a> Cache<'a> {
         };
 
         // shorthand helper functions
-
         let sig_ = sig.clone();
         let acquire_bus = |self_: &mut Self| {
             self_.state = CacheState::WaitingForBus_BusSig(sig_);
             self_.send_bus(BusMsg::Acquire(self_.id), 0);
         };
-
         let transition = |self_: &mut Self, state: BlockState| {
             self_.set_state_of(&addr, state);
         };
 
+        // state machine
         match self.state_of(&addr) {
             BlockState::MESI_Invalid => {},
             BlockState::MESI_Shared => {
@@ -892,11 +815,9 @@ impl<'a> Cache<'a> {
         };
 
         // shorthand helper functions
-
         let transition = |self_: &mut Self, state: BlockState| {
             self_.set_state_of(&addr, state);
         };
-
         let resolve_in = |self_: &mut Self, time: i32| {
             self_.send_self(CacheMsg::BusReqResolved, time);
         };
@@ -1007,7 +928,9 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                 match msg {
                     CacheMsg::Tick => {
                         if others_have_block.is_some() {
-                            self.handle_pr_req_bus_locked(req.clone(), others_have_block.clone());
+                            self.handle_pr_req_bus_locked(
+                                req.clone(),
+                                others_have_block.clone());
                         }
                     },
                     CacheMsg::PostTick => (),
@@ -1035,7 +958,9 @@ impl MsgHandler<CacheMsg> for Cache<'_> {
                 match msg {
                     CacheMsg::Tick => (),
                     CacheMsg::PostTick => {
-                        self.state = CacheState::ResolvingPrReq(req.clone(), Some(*others_have_block));
+                        self.state = CacheState::ResolvingPrReq(
+                            req.clone(),
+                            Some(*others_have_block));
                     },
                     _ => panic!("Cache in invalid state"),
                 }
@@ -1119,8 +1044,8 @@ enum BusSignal {
 #[derive(Clone, PartialEq, Debug)]
 enum BusState {
     Unlocked_Idle,      // bus free / not locked
-    Unlocked_Busy,      // bus free / not locked
-    Locked(i32),   // bus is currently owned by a single cache
+    Unlocked_Busy,      // bus free / not locked, busy sending signals signal
+    Locked(i32),        // bus is owned by a cache
     FreeNext,
 }
 
@@ -1320,10 +1245,7 @@ fn simulate(
     let n = insts.len() as i32;
 
     // each component (processors, caches, bus) communicates to others by sending messages
-    // to the simulator (main thread) via channels which will forward messages to the
-    // intended recipient
-
-    // implement everything single-threaded for now
+    // to the simulator via channels which will forward messages to the receiver component
 
     let (mut dq, tx) = DelayedQ::<Msg>::new();
 
@@ -1370,14 +1292,14 @@ fn simulate(
         cycle_count += 1;
         dq.update_time(cycle_count);
 
-        let all_procs_done = procs.iter().all(|p| p.state == Done);
+        let all_procs_done = procs.iter().all(|p| p.state == ProcState::Done);
         if all_procs_done && dq.is_empty() { break; }
 
         // tick everyone -- the order does not matter!!
         for proc_id in 0..n {
             match procs[proc_id as usize].state {
                 // some optional optimizations
-                Done => {
+                ProcState::Done => {
                     if proc_done_cycles[proc_id as usize].is_none() {
                         proc_done_cycles[proc_id as usize] = Some(cycle_count);
                     }
@@ -1386,7 +1308,6 @@ fn simulate(
                 ProcState::WaitingForCache => continue,
                 _ => send_msg(Msg::ToProc(proc_id, ProcMsg::Tick)),
             };
-            // send_msg(Msg::ToProc(proc_id, ProcMsg::Tick));
         }
         for cache_id in 0..n {
             // some optional optimizations
@@ -1395,7 +1316,6 @@ fn simulate(
                     send_msg(Msg::ToCache(cache_id, CacheMsg::Tick)),
                 _ => continue,
             };
-            // send_msg(Msg::ToCache(cache_id, CacheMsg::Tick));
         }
         send_msg(Msg::ToBus(BusMsg::Tick));
 
@@ -1427,7 +1347,7 @@ fn simulate(
             if !dq.msg_available() { dq.update_q() }
         }
 
-        // post-tick everyone -- THE ORDER SHOULD NOT MATTER!!
+        // post-tick everyone -- again, the order does not matter!!
         for proc_id in 0..n {
             procs[proc_id as usize].handle_msg(ProcMsg::PostTick);
         }
@@ -1442,7 +1362,9 @@ fn simulate(
         } else if let Some(i) = print_cycle_infos {
             if cycle_count - last_printed_cycle_count >= i {
                 let instruction_counts =
-                    procs.iter().map(|p| format!("{:<15}", p.instructions.len())).collect::<Vec<_>>();
+                    procs.iter().map(|p|
+                        format!("{:<15}", p.instructions.len())
+                    ).collect::<Vec<_>>();
                 let cycle_count_str = {
                     let mut s = String::new();
                     for (i, c) in format!("{}", cycle_count).chars().rev().enumerate() {
@@ -1451,7 +1373,6 @@ fn simulate(
                     }
                     s.chars().rev().collect::<String>()
                 };
-
                 println!("{}\t\t{}", cycle_count_str, instruction_counts.join("\t"));
                 last_printed_cycle_count = cycle_count;
             }
@@ -1502,6 +1423,9 @@ fn simulate(
 
 
 fn read_testfiles(testname: &str) -> Vec<Instructions> {
+    // reads all files that begin with testname from the tests directory
+    // and returns a vector of instructions for each file
+    // the order is currently undefined
     let mut insts = Vec::new();
     let paths = fs::read_dir("../tests/").unwrap();
     // iterate all files that start with `testname`
@@ -1538,6 +1462,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let specs;
     let testname;
+
     if args.len() > 1 {
         specs = SystemSpec {
             protocol: match args[1].as_str() {
@@ -1556,17 +1481,13 @@ fn main() {
         testname = "custom";
     }
 
-    use std::time::Instant;
     let t0 = Instant::now();
-
     simulate(
-        // load system specs from command line args
         specs,
         read_testfiles(testname),
         false,
         Some(400000),
     );
-
     let t1 = Instant::now();
     println!("execution time {:?}", t1-t0);
 }

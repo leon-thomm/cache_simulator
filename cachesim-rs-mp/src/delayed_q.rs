@@ -16,9 +16,9 @@ pub type DelQSender<MsgType> = mpsc::Sender<DelayedMsg<MsgType>>;
 // timed message type
 
 /*
-    to avoid having to mutate every element in the queue, which would either require
+    To avoid having to mutate every element in the queue, which would either require
     unsafe code or rebuilding the whole heap, the queue does not decrease a delay,
-    but instead increases its timestamp. the queue uses TimedMsg where t denotes the
+    but instead increases its timestamp. The queue uses TimedMsg where t denotes the
     timestamp at which the message should be sent (and the monotonically increased
     ord defines the order of different time messages within one timestamp),
     whereas in DelayedMsg t denotes the remaining delay.
