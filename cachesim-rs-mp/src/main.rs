@@ -3,7 +3,7 @@ extern crate core;
 mod delayed_q;
 mod delayed_q_unhashed;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::{env, fs};
 use std::fs::File;
 use std::io::Read;
@@ -344,15 +344,19 @@ enum BlockState {
 }
 
 struct CacheSet<'a> {
-    blocks: Vec<CacheBlock>,
+    //               tag    last_used,  block
+    blocks: HashMap<i32,    (i32,       CacheBlock)>,
     specs: &'a SystemSpec,
+    mru_ctr: i32,
 }
 
 impl<'a> CacheSet<'a> {
     fn new(specs: &'a SystemSpec) -> CacheSet {
+        let map = HashMap::with_capacity(specs.cache_assoc as usize);
         CacheSet {
-            blocks: vec![],
+            blocks: map,
             specs,
+            mru_ctr: -1,
         }
     }
 }
@@ -390,9 +394,9 @@ impl<'a> Cache<'a> {
     }
     fn state_of(&self, addr: &Addr) -> BlockState {
         let (set, tag) = self.set_and_tag_of(addr);
-        let block_state = set.blocks.iter()
-            .find(|block| block.tag == tag)
-            .map(|block| block.state.clone())
+        let block_state = set.blocks
+            .get(&tag)
+            .map(|(_, b)| b.state.clone())
             .unwrap_or(match self.specs.protocol {
                 Protocol::MESI => BlockState::MESI_Invalid,
                 Protocol::Dragon => BlockState::Dragon_Invalid,
@@ -409,36 +413,29 @@ impl<'a> Cache<'a> {
     }
     fn access_uncached(&mut self, addr: &Addr, state: BlockState) {
         let (index, tag) = addr.pos(self.specs);
-        match self.state_of(addr) {
-            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => {
-                self.data[index as usize].blocks.push(CacheBlock { tag, state, });
-            },
-            _ => panic!("Block is unexpectedly cached"),
+        if self.data[index as usize].blocks.len() == self.specs.cache_assoc as usize {
+            // evict lru
+            let lru_tag = self.data[index as usize].blocks
+                .iter()
+                .min_by_key(|(_, (last_used, _))| last_used)
+                .map(|(tag, _)| *tag)
+                .unwrap();
+            self.data[index as usize].blocks.remove(&lru_tag);
         }
+        self.data[index as usize].mru_ctr += 1;
+        let new_key = self.data[index as usize].mru_ctr;
+        self.data[index as usize].blocks.insert(tag, (new_key, CacheBlock { tag, state, }));
     }
     fn access_cached(&mut self, addr: &Addr) {
-        // employ LRU policy
         let (index, tag) = addr.pos(self.specs);
-        match self.state_of(addr) {
-            BlockState::MESI_Invalid | BlockState::Dragon_Invalid => panic!("Block is unexpectedly uncached"),
-            _ => {
-                let set = &mut self.data[index as usize];
-                let addr_index = set.blocks.iter()
-                    .position(|block| block.tag == tag)
-                    .unwrap();
-                // move block to the end of the set
-                let block = set.blocks.remove(addr_index);
-                set.blocks.push(block);
-            },
-        }
+        self.data[index as usize].mru_ctr += 1;
+        self.data[index as usize].blocks.get_mut(&tag).unwrap().0 =
+            self.data[index as usize].mru_ctr;
     }
     fn set_state_of(&mut self, addr: &Addr, state: BlockState) {
         let (index, tag) = addr.pos(self.specs);
         let set = &mut self.data[index as usize];
-
-        let block = set.blocks.iter_mut()
-            .find(|b| b.tag == tag)
-            .unwrap();
+        let (_, block) = set.blocks.get_mut(&tag).unwrap();
         block.state = state;
     }
     // events and transitions
@@ -621,8 +618,8 @@ impl<'a> Cache<'a> {
         // if we are doing something that requires asking other caches, do that before proceeding
         let need_to_ask_other_caches = others_have_block.is_none() && (
             (mesi && !(block_is_invalid && req_is_write)) ||
-            (dragon && (block_is_invalid || (req_is_write && block_is_shared))));
-            // for Dragon, we naively ask other caches every time we write
+                (dragon && (block_is_invalid || (req_is_write && block_is_shared))));
+        // for Dragon, we naively ask other caches every time we write
         if need_to_ask_other_caches {
             self.send_sim(
                 SimMsg::AskOtherCaches(addr.clone()),
@@ -1291,10 +1288,9 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
 
     // simulate
     let mut cycle_count = -1;
-    let mut last_printed_cycle_count = -1;
+    let mut last_printed_cycle_count = 0;
     if print_states { Printer::print_header(&procs, &caches, &bus); }
 
-    let mut system_state = SystemState::new();
     loop {
         cycle_count += 1;
         dq.update_time(cycle_count);
@@ -1359,10 +1355,19 @@ fn simulate(specs: SystemSpec, insts: Vec<Instructions>, print_states: bool, opt
 
         if print_states {
             Printer::print_row(cycle_count, &procs, &caches, &bus);
-        } else if cycle_count - last_printed_cycle_count > 100000 {
+        } else if cycle_count - last_printed_cycle_count == 400000 {
             let instruction_counts =
                 procs.iter().map(|p| format!("{:<15}", p.instructions.len())).collect::<Vec<_>>();
-            println!("{}\t\t{}", cycle_count, instruction_counts.join("\t"));
+            let cycle_count_str = {
+                let mut s = String::new();
+                for (i, c) in format!("{}", cycle_count).chars().rev().enumerate() {
+                    if i>0 && i %3 == 0 { s.push('-'); }
+                    s.push(c);
+                }
+                s.chars().rev().collect::<String>()
+            };
+
+            println!("{}\t\t{}", cycle_count_str, instruction_counts.join("\t"));
             last_printed_cycle_count = cycle_count;
         }
 
@@ -1377,7 +1382,7 @@ fn read_testfiles(testname: &str) -> Vec<Instructions> {
     // iterate all files that start with `testname`
     for path in paths.filter_map(|p| p.ok()).filter(|p| {
         p.file_name().to_str().unwrap().starts_with(testname) &&
-        p.file_name().to_str().unwrap().ends_with(".data")
+            p.file_name().to_str().unwrap().ends_with(".data")
     }) {
         println!("reading file: {:?}", path.file_name());
         let mut f = File::open(path.path()).unwrap();
