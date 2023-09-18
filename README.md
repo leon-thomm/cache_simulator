@@ -1,1 +1,4 @@
-A fast MESI and Dragon cache coherence protocol simulator written in Rust (see `cachesim-rs`). A report of the project can be found in the `report` directory.
+- Fast MESI and Dragon cache coherence protocol simulator written in Rust.
+- A report of the project is available in the `report/` directory
+- The report uses the implementation in `cachesim-rs`.
+- `cachesim-ax-mesi` contains a re-implementation of MESI based on the [asynchronix](https://docs.rs/asynchronix/0.2.0/asynchronix/) crate.

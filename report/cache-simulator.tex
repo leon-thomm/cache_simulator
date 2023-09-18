@@ -22,7 +22,6 @@
 \usepackage{stackengine}
 \usepackage{xcolor}
 \usepackage{listings}
-\usepackage{hyperref}
 % BLOCKS
 \usepackage{beamerarticle}
 \usepackage[most]{tcolorbox}
@@ -101,7 +100,7 @@
 	},
 	overlay={
 		\begin{tcbclipinterior}
-			\fill[black!30!white] (frame.south west)
+			\fill[black!30!white] (frame.south west) 
 			rectangle ([xshift=1mm]frame.north west);
 		\end{tcbclipinterior}
 	},
@@ -130,7 +129,7 @@
 \renewcommand\thesection{\arabic{section}}
 \renewcommand\thesubsection{\thesection.\alph{subsection}}
 
-This report summarizes the specifications, main implementation aspects, and simulation findings of a MESI and Dragon cache coherence simulator that was built as a project for \textit{Multi-Core Architectures} at the \textit{National University of Singapore}. The full code can be found on \href{https://github.com/leon-thomm/cache_simulator}{GitHub}.
+\section{Abstract}
 
 \section{Specifications}
 
@@ -233,8 +232,7 @@ The trade-off of encoding all internal components as finite state machines witho
 
 Important for the state diagrams are the key insights stated above, and specifically the two kinds of operations (requiring bus communication or not). Also, without an order of ticking specified, it is important when a cycle starts and when it ends (i.e. falling clock edge). On the rising edge components start to make progress, send signals to other components, process certain incoming signals, and make state transitions. The falling edge (\textit{post\_tick}) is used to make sure the component enters a new state for the next cycle, \textit{after} all signals between components regarding the current cycle have been sent and processed (so no signals are allowed to be sent during \textit{post\_tick}). This greatly simplifies the design under parameterized timing constraints.
 
-\end{multicols}
-\begin{multicols}{2}
+\newpage
 
 \begin{center}
 \includegraphics[width=9cm]{img/state_diagram_bus.png}
@@ -313,9 +311,9 @@ BusState::Unlocked_Busy => ...
 
 \subsubsection{optimizations and accessibility}
 
-The rich type system of Rust already enables quite substantial optimizations at compile time, which can be supported by using generic types etc. The re-implementation of the delayed queue for speed was mentioned in the previous section. It is also worth noting that turning on optimizations in the rust compiler (compiling for \textit{release}, with level 3 optimizations) had a substantial impact on performance.
+The rich type system of Rust already enables quite substantial optimizations at compile time, which can be supported by using generic types etc. The re-implementation of the delayed queue for speed was mentioned in the previous section. It is also worth noting that turning on optimizations in the rust compiler (compiling for \textit{release}) had a substantial impact on performance.
 
-Further code-based optimizations focused on preventing unnecessary ticks of components in states where a \textit{tick} message cannot cause any progress, which is fairly easy when all components are simply finite state machines and all communication goes through a central message queue.
+Further, code-based optimizations focused on preventing unnecessary ticks of components in states where a \textit{tick} message cannot cause any progress, which is fairly easy when all components are simply finite state machines and all communication goes through a central message queue.
 
 \begin{code}[Rust]{Simulator Optimizations}
 match procs[proc_id as usize].state {
@@ -325,9 +323,7 @@ match procs[proc_id as usize].state {
 };
 \end{code}
 
-Furthermore, it is worth noting that this system is - by design - easily parallelizable using multi-threading. However, because of the central message queue, all threads should run on the same core (in order to share caches) when running the simulation.
-
-We also integrated some improvements over a naive MESI implementation, which include the Illinois behavior of preferring cache-to-cache transfer when possible, and the ability to continue and unlock the bus even when bus signals are pending transmission (the bus itself holds a queue for these).
+Furthermore, it is worth noting that this system is - by design - easily parallelizable using multi-threading. However, because of the central message queue, all threads should run on the same core in order to share memory when running the simulation.
 
 We also used the opportunity to do some WebAssembly (\textit{WASM}) benchmarking. We could compile the simulator to WASM architectures without any code changes. The execution time of the WASI version was only about twice that of the native one, which is quite impressive.
 
@@ -336,65 +332,7 @@ We also used the opportunity to do some WebAssembly (\textit{WASM}) benchmarking
 \section{Analysis}
 
 \subsection{MESI}
-Benchmark results for MESI protocol (1 KiB Cache, direct map, block size 16):\\
-
-Blackscholes:\\
-\includegraphics[width=18cm]{img/MESI.PNG}
-
-\newpage
-
-Bodytrack:\\
-\includegraphics[width=18cm]{img/MESIbodytrack.PNG}
-
-Fluidanimate:\\
-\includegraphics[width=18cm]{img/MESIfluidanimate.PNG}
-
 
 \subsection{Dragon}
-Benchmark results for Dragon protocol (1 KiB Cache, direct map, block size 16):\\
 
-Blackscholes:\\
-\includegraphics[width=18cm]{img/dragon.PNG}
-
-Bodytrack:\\
-\includegraphics[width=18cm]{img/dragonbodytrack.PNG}
-
-Fluidanimate:\\
-\includegraphics[width=18cm]{img/dragonfluidanimate.PNG}
-
-Overall, we notice very similar results when comparing the MESI and Dragon protocols for all three of the benchmarks, running with a 1K direct mapped cache with block size of 16.
-
-From running the three different benchmarks with a 1K direct mapped cache with a block size of 16, we observe that on average, the MESI protocol has nearly double the cycles per core compared to the DRAGON protocol. Both the MESI and Dragon protocols have similar miss rates, and similar proportions of their cycles spent on wait cycles. Furthermore, both the MESI and Dragon protocols have similar miss rates and private access rates. Likewise, both experience similar amounts of invalidations. However, the MESI protocol has a higher amount of bus traffic compared to the Dragon protocol.
-
-The increase in the number of execution cycles can be explained by the high cost of invalidations in the MESI protocol. With the MESI protocol, when a cache block is written to, all other caches must discard their versions of the block, whereas in the Dragon protocol, there are bus update signals that will update the data in other caches. Another factor for the increased cycles is due to our implementation of the Illinois MESI protocol, where caches can share data between one another. Cache misses require a search of all other processors' caches to see if they have the block being searched for.
-
-The increase in the volume of bus traffic in bytes in the MESI protocol can be explained by the fact that we implemented the Illinois-MESI protocol. With this protocol, we can share data between caches, so the bus will frequently transfer cache blocks between the caches of different CPUs, which adds a substantial amount of overhead in traffic.
-
-From observing the results of the Dragon and Illinois-MESI protocol across these three different benchmarks, the Dragon protocol would be preferred for each benchmark because of the lower cycle counts, as well as the lower volume of bus traffic. Using the Dragon protocol would lead to a more efficient execution with respect to these three benchmarks.
-
-\subsection{Fluidanimate on MESI}
-
-\begin{table}[!ht]
-    \centering
-    \begin{tabular}{llll}
-        \textbf{cache size} & \textbf{assiciativity} & \textbf{block size} & \textbf{avg. miss rate} \\ \hline
-        512 & 1 & 16 & 0.74105008 \\
-        512 & 2 & 16 & 0.733073148 \\
-        512 & 3 & 16 & 0.74515101 \\
-        512 & 4 & 16 & 0.72208518 \\
-        1024 & 1 & 16 & 0.6412578 \\
-        1024 & 2 & 16 & 0.60319607 \\
-        1024 & 3 & 16 & 0.594221075 \\
-        1024 & 4 & 16 & 0.611503995 \\
-        2048 & 1 & 16 & 0.5248601 \\
-        2048 & 2 & 16 & 0.491306805 \\
-        2048 & 3 & 16 & 0.467433068 \\
-        2048 & 4 & 16 & 0.47193364 \\
-        4096 & 1 & 16 & 0.446913793 \\
-        4096 & 2 & 16 & 0.39347735 \\
-        4096 & 3 & 16 & 0.37981965 \\
-        4096 & 4 & 16 & 0.372726315 \\
-    \end{tabular}
-\end{table}
-For both the MESI and Dragon protocols, as we increase the size of our cache, the average miss rate will go down. Likewise, if we increase the associativity of our cache, the average miss rate will also go down. When we increase the size of our cache, there are more spaces for blocks to be placed in. When we increase the associativity of our cache, a block of memory can be placed in more possible locations. Both of these contribute to more items being stored in our cache, reducing the miss rate.
 \end{document}

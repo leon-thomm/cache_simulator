@@ -1,0 +1,4 @@
+{
+    "workbench.tree.indent": 10,
+    "editor.inlayHints.enabled": "offUnlessPressed", // press Ctrl+Alt to show hints
+}

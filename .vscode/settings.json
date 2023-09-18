@@ -1,0 +1,12 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./cachesim-rs/Cargo.toml",
+        "./cachesim-ax2/Cargo.toml",
+        "./cachesim-ax3/Cargo.toml",
+        "./cachesim-ax4/Cargo.toml",
+        "./component-testing/Cargo.toml",
+        "./cachesim-ax4/Cargo.toml",
+        "./cachesim-ax4/Cargo.toml"
+    ],
+    "editor.inlayHints.enabled": "offUnlessPressed",
+}

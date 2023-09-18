@@ -1,3 +1,5 @@
+*DEPRACATED*
+
 ### Detailed specifications and assumptions
 
 **processor behavior**
@@ -15,6 +17,7 @@
 - any cache can always immediately respond to bus requests (*). if the cache gets asked to deliver a block which is pending eviction, the block is assumed to be invalid and cannot be delivered anymore
 - while the penalty for loading a cache line from memory is 100 cycles, the MESI cache implements Illionis and thus first tries to get the line from another cache, which adds to these 100 cycles if no one has it
 - the system always prefers cache-to-cache transfer
+- cache his latency of 1 cycle is understood as: processor can proceed in the next cycle, after the one that issued the request
 
 **further system and timing specs**
 
@@ -24,6 +27,8 @@
 - if multiple caches could deliver a line, there is no additional time needed to select one - the selection algorithm is expected to terminate in the same cycle
 - the memory is word-addressible not, byte-addressible
 - memory is generally only updated on eviction/flushing
+- the lecture slides about MESI show a `Flush` operation on $E\overset{\text{BusRd}}{\longrightarrow}S$, which does not make sense to me and does not seem to be the usual case, see also [wikipedia](https://en.wikipedia.org/wiki/MESI_protocol). I am assuming the state transitions on wikipedia
+- also notice that the state diagram on wikipedia for the Dragon protocol seems to be wrong as well - I reported it
 - the caches do not flush their dirty lines at the end of the simulation - the system is assumed to run indefinitely
 
 (*): as stated in the task description
@@ -50,14 +55,6 @@ From the perspective of some cache $C_i$, the bus can be:
 * foreign owned: $C_i$ can respond to incoming bus requests - owner is responsible of preventing conflicts
 * free: $C_i$ can try to lock the bus in order to start sending requests
 
-***
-
-A snooping cache can receive bus signals triggering three kinds of actions (and any combinations)
-    1. the cache responding / possibly providing some data
-    2. a transition in the data cache
-    3. bus signals as a result of (2)
-
-We assume that action (1) can alays be executed immediately, given the cache currently doesn't own the bus. However, the actual data cache might be busy resolving a request from the processor, so actions (2) and (3) must be buffered and handled later. Since the incoming bus sginal should only have an effect on *future* operations in the cache (and not on the one currently running), it is safe for the cache to handle the bus signal immediately *after* completing the current processor request.
 
 ***
 

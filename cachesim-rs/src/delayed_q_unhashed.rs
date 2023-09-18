@@ -3,11 +3,7 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
-use std::fmt::Error;
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::sync::mpsc::TryRecvError;
-use crate::Msg;
 
 // delayed message type
 
